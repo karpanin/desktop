@@ -249,12 +249,14 @@ const getChatFolderId = async (connectionId: string, chatId: string): Promise<st
   } catch (err) {
     log.warn(`[work] chat lookup failed for ${chatId}:`, err?.message ?? err)
   }
-  chatFolderCache.set(key, { folderId, ts: Date.now() })
+  // A chat can be moved into a project at any time — keep "no folder" short
+  chatFolderCache.set(key, {
+    folderId,
+    ts: folderId ? Date.now() : Date.now() - CHAT_FOLDER_TTL + 2_000
+  })
   return folderId
 }
 
-// Register this server as a user-level terminal server in the user's
-// Open WebUI settings.  Field-level patch — other settings are untouched.
 const readTerminalServers = async (connectionId: string): Promise<any[]> => {
   const settings = await owuiFetch(connectionId, '/api/v1/users/user/settings?raw=true')
   return settings?.ui?.terminalServers ?? []
@@ -411,14 +413,11 @@ export const unlinkWorkProject = async (connectionId: string, folderId: string) 
 
 // Find the linked project for a chat.  Chats in a sub-folder inherit the
 // nearest linked ancestor.
-const projectForChat = async (
+// Nearest linked project for a folder — sub-folders inherit their parent's link
+const projectForFolder = async (
   connectionId: string,
-  chatId: string
+  folderId: string
 ): Promise<WorkProject | null> => {
-  if (!chatId || chatId.startsWith('local:')) return null
-  const folderId = await getChatFolderId(connectionId, chatId)
-  if (!folderId) return null
-
   const { projects } = await workConfig()
   let current: string | null = folderId
   const seen = new Set<string>()
@@ -430,6 +429,48 @@ const projectForChat = async (
     current = folders.find((f) => f.id === current)?.parent_id ?? null
   }
   return null
+}
+
+const projectForChat = async (
+  connectionId: string,
+  chatId: string
+): Promise<WorkProject | null> => {
+  if (!chatId || chatId.startsWith('local:')) return null
+  const folderId = await getChatFolderId(connectionId, chatId)
+  return folderId ? projectForFolder(connectionId, folderId) : null
+}
+
+// What the desktop Work bar shows for the page open in a webview:
+// the project of /folders/<id> or of the chat /c/<id>.
+export const getWorkContext = async (connectionId: string, pageUrl: string) => {
+  let pathname: string
+  try {
+    pathname = new URL(pageUrl).pathname
+  } catch {
+    return null
+  }
+  if (!attached.has(connectionId)) return null
+
+  let folderId = pathname.match(/\/folders\/([^/?#]+)/)?.[1] ?? null
+  const chatId = pathname.match(/\/c\/([^/?#]+)/)?.[1] ?? null
+  if (!folderId && chatId)
+    folderId = await getChatFolderId(connectionId, decodeURIComponent(chatId))
+  if (!folderId) return null
+  folderId = decodeURIComponent(folderId)
+
+  let folders = await listWorkFolders(connectionId).catch(() => [])
+  if (!folders.some((f) => f.id === folderId)) {
+    folders = await listWorkFolders(connectionId, true).catch(() => [])
+  }
+  const folder = folders.find((f) => f.id === folderId)
+  if (!folder) return null
+
+  return {
+    folderId,
+    folderName: folder.name,
+    project: await projectForFolder(connectionId, folderId),
+    serverEnabled: await getWorkServerEnabled(connectionId).catch(() => null)
+  }
 }
 
 // ─── Path Sandboxing ────────────────────────────────────

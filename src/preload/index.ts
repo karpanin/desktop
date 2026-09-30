@@ -189,6 +189,8 @@ const api = {
   attachWorkConnection: (connectionId: string, url: string) =>
     ipcRenderer.invoke('work:attach', connectionId, url),
   getWorkProjects: (connectionId: string) => ipcRenderer.invoke('work:projects', connectionId),
+  getWorkContext: (connectionId: string, url: string) =>
+    ipcRenderer.invoke('work:context', connectionId, url),
   linkWorkProject: (connectionId: string, folderId: string, folderName: string) =>
     ipcRenderer.invoke('work:link', connectionId, folderId, folderName),
   updateWorkProject: (connectionId: string, folderId: string, patch: Record<string, any>) =>

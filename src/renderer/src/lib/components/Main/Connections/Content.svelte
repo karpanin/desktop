@@ -6,6 +6,7 @@
   import LocalInstall from '../../Setup/LocalInstall.svelte'
   import GetStartedModal from './GetStartedModal.svelte'
   import AddConnectionModal from './AddConnectionModal.svelte'
+  import WorkBar from './WorkBar.svelte'
   import landingVideo from '../../../../assets/landing.mp4'
 
   interface Props {
@@ -55,6 +56,15 @@
   }: Props = $props()
 
   let showGetStartedModal = $state(false)
+
+  // Current page of each webview (SvelteKit navigates with pushState, so
+  // in-page navigations count too) — drives the Work bar
+  let pageUrls = $state(new Map<string, string>())
+  const setPageUrl = (connId: string, pageUrl: string) => {
+    if (!pageUrl?.startsWith('http') || pageUrls.get(connId) === pageUrl) return
+    pageUrls.set(connId, pageUrl)
+    pageUrls = new Map(pageUrls)
+  }
 
   // Requests the Open WebUI page may make through window.electronAPI.send().
   // Anything not listed here is answered with `undefined`.
@@ -165,11 +175,16 @@
         })
 
         // Clear error when a navigation succeeds (retry, redirect, etc.)
-        wv.addEventListener('did-navigate', () => {
+        wv.addEventListener('did-navigate', (event: any) => {
+          setPageUrl(connId, event.url)
           if (webviewErrors.has(connId)) {
             webviewErrors.delete(connId)
             webviewErrors = new Map(webviewErrors)
           }
+        })
+
+        wv.addEventListener('did-navigate-in-page', (event: any) => {
+          if (event.isMainFrame !== false) setPageUrl(connId, event.url)
         })
 
         // Renderer process crash
@@ -275,6 +290,10 @@
     ? 'border-l border-black/[0.08] dark:border-white/[0.08] rounded-tl-xl'
     : 'border-black/[0.08] dark:border-white/[0.10]'}"
 >
+  {#if view === 'connected' && activeConnectionId && pageUrls.get(activeConnectionId)}
+    <WorkBar connectionId={activeConnectionId} url={pageUrls.get(activeConnectionId) ?? ''} />
+  {/if}
+
   <!-- Webviews — all open connections stay alive, only active one visible -->
   {#each [...openConnections] as [connId, connUrl] (connId)}
     <webview
