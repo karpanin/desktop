@@ -39,7 +39,13 @@ def extract_text(path, pages=None):
 
 def extract_tables(path, pages=None):
     """Return [{"page": n, "rows": [[...], ...]}] for tables pdfplumber detects."""
-    import pdfplumber
+    try:
+        import pdfplumber
+    except ImportError:
+        raise RuntimeError(
+            "Table extraction needs pdfplumber, which is not available on this computer. "
+            "Use extract_text() and read the table from the text instead."
+        ) from None
 
     tables = []
     with pdfplumber.open(path) as pdf:

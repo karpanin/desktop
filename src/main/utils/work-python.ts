@@ -21,10 +21,14 @@ export const WORK_PYTHON_PACKAGES = [
   'python-docx',
   'python-pptx',
   'pypdf',
-  'pdfplumber',
   'pandas',
   'matplotlib'
 ]
+// Nice to have: installed when a prebuilt wheel exists for this platform
+// (owui_work falls back to pypdf for PDF text without it)
+export const WORK_PYTHON_OPTIONAL_PACKAGES = ['pdfplumber']
+
+const ALL_PACKAGES = [...WORK_PYTHON_PACKAGES, ...WORK_PYTHON_OPTIONAL_PACKAGES]
 
 export type WorkPythonStatus = {
   state: 'missing' | 'installing' | 'ready' | 'failed'
@@ -57,8 +61,8 @@ export const workPythonResourcesDir = () =>
 
 const isReady = (): boolean => {
   try {
-    const installed = JSON.parse(fs.readFileSync(markerPath(), 'utf8'))
-    return fs.existsSync(venvPython()) && installed.join() === WORK_PYTHON_PACKAGES.join()
+    const marker = JSON.parse(fs.readFileSync(markerPath(), 'utf8'))
+    return fs.existsSync(venvPython()) && marker?.requested?.join() === ALL_PACKAGES.join()
   } catch {
     return false
   }
@@ -113,12 +117,34 @@ export const ensureWorkPython = (): Promise<string> => {
         await runTool(basePython, ['-m', 'uv', 'venv', '--python', basePython, venvDir()])
       }
       setStatus({ state: 'installing', message: 'Installing document libraries…' })
-      await runTool(
-        basePython,
-        ['-m', 'uv', 'pip', 'install', '--python', venvPython(), ...WORK_PYTHON_PACKAGES],
-        (line) => setStatus({ state: 'installing', message: line.slice(0, 120) })
-      )
-      fs.writeFileSync(markerPath(), JSON.stringify(WORK_PYTHON_PACKAGES))
+      // Prebuilt wheels only: office machines have no compilers, and uv
+      // picks versions that ship wheels for this platform (e.g. an older
+      // cryptography on Windows ARM64) instead of building from source.
+      const install = (packages: string[]) =>
+        runTool(
+          basePython,
+          [
+            '-m',
+            'uv',
+            'pip',
+            'install',
+            '--only-binary',
+            ':all:',
+            '--python',
+            venvPython(),
+            ...packages
+          ],
+          (line) => setStatus({ state: 'installing', message: line.slice(0, 120) })
+        )
+      let missing: string[] = []
+      try {
+        await install(ALL_PACKAGES)
+      } catch (err) {
+        log.warn('[work-python] full install failed, retrying without optional packages:', err)
+        await install(WORK_PYTHON_PACKAGES)
+        missing = WORK_PYTHON_OPTIONAL_PACKAGES
+      }
+      fs.writeFileSync(markerPath(), JSON.stringify({ requested: ALL_PACKAGES, missing }))
       setStatus({ state: 'ready' })
       log.info('[work-python] ready')
       return venvPython()
