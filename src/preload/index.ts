@@ -198,6 +198,8 @@ const api = {
   unlinkWorkProject: (connectionId: string, folderId: string) =>
     ipcRenderer.invoke('work:unlink', connectionId, folderId),
   setWorkEnabled: (enabled: boolean) => ipcRenderer.invoke('work:setEnabled', enabled),
+  getWorkServerEnabled: (connectionId: string) =>
+    ipcRenderer.invoke('work:serverEnabled', connectionId),
   setWorkServerEnabled: (connectionId: string, enabled: boolean) =>
     ipcRenderer.invoke('work:setServerEnabled', connectionId, enabled),
 

@@ -93,6 +93,7 @@ import {
   updateWorkProject,
   unlinkWorkProject,
   setWorkServerEnabled,
+  getWorkServerEnabled,
   getWorkContext
 } from './utils/work'
 
@@ -1651,6 +1652,9 @@ if (!gotTheLock) {
     )
     ipcMain.handle('work:context', (_event, connectionId: string, url: string) =>
       getWorkContext(connectionId, url)
+    )
+    ipcMain.handle('work:serverEnabled', (_event, connectionId: string) =>
+      getWorkServerEnabled(connectionId).catch(() => null)
     )
     ipcMain.handle('work:setServerEnabled', (_event, connectionId: string, enabled: boolean) =>
       setWorkServerEnabled(connectionId, enabled)

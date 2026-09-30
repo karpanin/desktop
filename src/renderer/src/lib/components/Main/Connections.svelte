@@ -1,7 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
   import { fade } from 'svelte/transition'
-  import { connections, config, serverInfo, appState } from '../../stores'
+  import {
+    connections,
+    config,
+    serverInfo,
+    appState,
+    activeConnection,
+    workTick
+  } from '../../stores'
   import i18n from '../../i18n'
 
   import Sidebar from './Connections/Sidebar.svelte'
@@ -257,6 +264,16 @@
     openConnections = new Map(openConnections)
   }
 
+  // Shared with the top bar Chat / Work toggle and the Work bar
+  $effect(() => {
+    const connUrl = openConnections.get(activeConnectionId)
+    activeConnection.set(
+      view === 'connected' && activeConnectionId && connUrl
+        ? { id: activeConnectionId, url: connUrl }
+        : null
+    )
+  })
+
   $effect(() => {
     if (activeConnectionId === 'local') {
       activeConnectionName = localConn?.name ?? 'Open WebUI'
@@ -451,6 +468,10 @@
           `webview[partition="persist:connection-${data.data.connectionId}"]`
         ) as any
         wv?.reload?.()
+        return
+      }
+      if (data.type === 'work:status') {
+        workTick.update((n) => n + 1)
         return
       }
       if (data.type?.startsWith('work:')) return

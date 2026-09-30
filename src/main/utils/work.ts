@@ -297,16 +297,18 @@ const ensureRegistered = async (connectionId: string): Promise<'ok' | 'changed'>
   return 'changed'
 }
 
-// Whether Open WebUI currently offers our tools (the toggle in
-// Open WebUI → Settings → Integrations → Open Terminal).
+// Whether Open WebUI currently offers our tools — this is the Chat / Work
+// switch (also Open WebUI → Settings → Integrations → Open Terminal).
 export const getWorkServerEnabled = async (connectionId: string): Promise<boolean | null> => {
   const servers = await readTerminalServers(connectionId)
   const current = servers.find((s) => s?.desktop_work)
   return current ? current.enabled !== false : null
 }
 
-// Turn our terminal server on/off in Open WebUI.  Enabling mirrors Open
-// WebUI's own toggle: the other direct terminals are switched off.
+// Switch between Chat and Work: turn our terminal server on/off in Open
+// WebUI.  Enabling mirrors Open WebUI's own toggle (other direct terminals
+// are switched off) and also selects it in the chat input's terminal menu,
+// so the file panel works right away.
 export const setWorkServerEnabled = async (connectionId: string, enabled: boolean) => {
   await ensureRegistered(connectionId)
   const servers = await readTerminalServers(connectionId)
@@ -316,6 +318,23 @@ export const setWorkServerEnabled = async (connectionId: string, enabled: boolea
       s?.desktop_work ? { ...s, enabled } : enabled ? { ...s, enabled: false } : s
     )
   )
+
+  // Open WebUI restores the selected terminal from localStorage on load
+  const url = JSON.stringify(baseUrlFor(connectionId))
+  const script = enabled
+    ? `localStorage.setItem('selectedTerminalId', ${url})`
+    : `if (localStorage.getItem('selectedTerminalId') === ${url}) localStorage.removeItem('selectedTerminalId')`
+  const ses = connectionSession(connectionId)
+  for (const contents of webContents.getAllWebContents()) {
+    try {
+      if (contents.isDestroyed() || contents.getType() !== 'webview' || contents.session !== ses)
+        continue
+      await contents.executeJavaScript(script)
+    } catch {
+      // Page not ready — the setting still applies after reload
+    }
+  }
+
   // Open WebUI reads terminal servers on load
   emit('work:reload', { connectionId })
 }
