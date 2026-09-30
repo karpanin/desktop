@@ -189,8 +189,6 @@ const api = {
   attachWorkConnection: (connectionId: string, url: string) =>
     ipcRenderer.invoke('work:attach', connectionId, url),
   getWorkProjects: (connectionId: string) => ipcRenderer.invoke('work:projects', connectionId),
-  getWorkContext: (connectionId: string, url: string) =>
-    ipcRenderer.invoke('work:context', connectionId, url),
   linkWorkProject: (connectionId: string, folderId: string, folderName: string) =>
     ipcRenderer.invoke('work:link', connectionId, folderId, folderName),
   updateWorkProject: (connectionId: string, folderId: string, patch: Record<string, any>) =>
@@ -198,8 +196,6 @@ const api = {
   unlinkWorkProject: (connectionId: string, folderId: string) =>
     ipcRenderer.invoke('work:unlink', connectionId, folderId),
   setWorkEnabled: (enabled: boolean) => ipcRenderer.invoke('work:setEnabled', enabled),
-  getWorkServerEnabled: (connectionId: string) =>
-    ipcRenderer.invoke('work:serverEnabled', connectionId),
   setWorkServerEnabled: (connectionId: string, enabled: boolean) =>
     ipcRenderer.invoke('work:setServerEnabled', connectionId, enabled),
 

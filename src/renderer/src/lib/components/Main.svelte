@@ -6,7 +6,6 @@
   import i18n from '../i18n'
   import Connections from './Main/Connections.svelte'
   import Settings from './Main/Settings.svelte'
-  import WorkModeToggle from './Main/WorkModeToggle.svelte'
 
   let visible = $state(false)
   let settingsOpen = $state(false)
@@ -91,13 +90,8 @@
           </button>
         {/if}
       </div>
-      <div class="flex-1 flex items-center justify-center gap-2 min-w-0">
-        {#if activeConnectionName}
-          <WorkModeToggle />
-          <span class="text-[11px] opacity-40 truncate">{activeConnectionName}</span>
-        {:else}
-          <span class="text-[11px] opacity-80">{$i18n.t('app.name')}</span>
-        {/if}
+      <div class="flex-1 flex items-center justify-center">
+        <span class="text-[11px] opacity-80">{activeConnectionName || $i18n.t('app.name')}</span>
       </div>
       <div class="pr-3 flex items-center gap-3 shrink-0 translate-y-[0.5px]">
         {#if activeConnectionName}

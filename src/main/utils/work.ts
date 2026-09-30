@@ -467,8 +467,7 @@ const projectForChat = async (
   return folderId ? projectForFolder(connectionId, folderId) : null
 }
 
-// What the desktop Work bar shows for the page open in a webview:
-// the project of /folders/<id> or of the chat /c/<id>.
+// The project of the page open in a webview: /folders/<id> or the chat /c/<id>
 export const getWorkContext = async (connectionId: string, pageUrl: string) => {
   let pathname: string
   try {
@@ -495,9 +494,41 @@ export const getWorkContext = async (connectionId: string, pageUrl: string) => {
   return {
     folderId,
     folderName: folder.name,
-    project: await projectForFolder(connectionId, folderId),
-    serverEnabled: await getWorkServerEnabled(connectionId).catch(() => null)
+    project: await projectForFolder(connectionId, folderId)
   }
+}
+
+// ─── In-page Chat / Work switch ─────────────────────────
+
+// Which connection a webview belongs to (by its partition session)
+export const workConnectionForContents = (contents: Electron.WebContents): string | null => {
+  for (const id of attached.keys()) {
+    if (connectionSession(id) === contents.session) return id
+  }
+  return null
+}
+
+export const getWorkProjectPath = async (connectionId: string, folderId: string) => {
+  const { projects } = await workConfig()
+  return projects[projectKey(connectionId, folderId)]?.path ?? null
+}
+
+// Everything the in-page switch renders for the current page: the mode,
+// the project context and — outside a project — the list to pick from.
+export const getWorkPageState = async (connectionId: string, pageUrl: string) => {
+  const enabled = await getWorkServerEnabled(connectionId).catch(() => null)
+  const context = enabled ? await getWorkContext(connectionId, pageUrl).catch(() => null) : null
+  let projects: any[] = []
+  if (enabled && !context) {
+    const { projects: linked } = await workConfig()
+    projects = (await listWorkFolders(connectionId).catch(() => [])).map((f) => ({
+      id: f.id,
+      name: f.name,
+      parentId: f.parent_id ?? null,
+      path: linked[projectKey(connectionId, f.id)]?.path ?? null
+    }))
+  }
+  return { enabled, context, projects }
 }
 
 // ─── Path Sandboxing ────────────────────────────────────

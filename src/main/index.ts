@@ -93,8 +93,9 @@ import {
   updateWorkProject,
   unlinkWorkProject,
   setWorkServerEnabled,
-  getWorkServerEnabled,
-  getWorkContext
+  workConnectionForContents,
+  getWorkPageState,
+  getWorkProjectPath
 } from './utils/work'
 
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater'
@@ -1627,34 +1628,34 @@ if (!gotTheLock) {
     })
 
     // Work mode
+    const linkWorkFolderWithDialog = async (
+      connectionId: string,
+      folderId: string,
+      folderName: string
+    ) => {
+      const result = await dialog.showOpenDialog(mainWindow!, {
+        title: `Link "${folderName}" to a local folder`,
+        properties: ['openDirectory', 'createDirectory']
+      })
+      const dir = result.canceled ? null : (result.filePaths[0] ?? null)
+      if (dir) await linkWorkProject(connectionId, folderId, folderName, dir)
+      return dir
+    }
+
+    // Desktop renderer (Settings → Work)
     ipcMain.handle('work:info', () => getWorkInfo())
     ipcMain.handle('work:attach', (_event, connectionId: string, url: string) =>
       attachWorkConnection(connectionId, url)
     )
     ipcMain.handle('work:projects', (_event, connectionId: string) => getWorkProjects(connectionId))
-    ipcMain.handle(
-      'work:link',
-      async (_event, connectionId: string, folderId: string, folderName: string) => {
-        const result = await dialog.showOpenDialog(mainWindow!, {
-          title: `Link "${folderName}" to a local folder`,
-          properties: ['openDirectory', 'createDirectory']
-        })
-        const dir = result.canceled ? null : (result.filePaths[0] ?? null)
-        if (dir) await linkWorkProject(connectionId, folderId, folderName, dir)
-        return dir
-      }
+    ipcMain.handle('work:link', (_event, connectionId: string, folderId: string, folderName: string) =>
+      linkWorkFolderWithDialog(connectionId, folderId, folderName)
     )
     ipcMain.handle('work:update', (_event, connectionId: string, folderId: string, patch: any) =>
       updateWorkProject(connectionId, folderId, patch)
     )
     ipcMain.handle('work:unlink', (_event, connectionId: string, folderId: string) =>
       unlinkWorkProject(connectionId, folderId)
-    )
-    ipcMain.handle('work:context', (_event, connectionId: string, url: string) =>
-      getWorkContext(connectionId, url)
-    )
-    ipcMain.handle('work:serverEnabled', (_event, connectionId: string) =>
-      getWorkServerEnabled(connectionId).catch(() => null)
     )
     ipcMain.handle('work:setServerEnabled', (_event, connectionId: string, enabled: boolean) =>
       setWorkServerEnabled(connectionId, enabled)
@@ -1665,6 +1666,33 @@ if (!gotTheLock) {
       if (enabled) await startWorkServer()
       else await stopWorkServer()
       return getWorkInfo()
+    })
+
+    // In-page Chat / Work switch (src/preload/work-overlay.ts).  The
+    // connection comes from the sender's session, never from arguments,
+    // and paths are only ever looked up from the linked projects.
+    const pageConnection = (event: Electron.IpcMainInvokeEvent): string => {
+      const connectionId =
+        event.sender.getType() === 'webview' ? workConnectionForContents(event.sender) : null
+      if (!connectionId) throw new Error('Not an Open WebUI connection page')
+      return connectionId
+    }
+    ipcMain.handle('work:page:state', (event, pageUrl: string) =>
+      getWorkPageState(pageConnection(event), String(pageUrl))
+    )
+    ipcMain.handle('work:page:setEnabled', (event, enabled: boolean) =>
+      setWorkServerEnabled(pageConnection(event), enabled === true)
+    )
+    ipcMain.handle('work:page:setMode', (event, folderId: string, mode: string) => {
+      if (!['read', 'confirm', 'auto'].includes(mode)) throw new Error('Invalid mode')
+      return updateWorkProject(pageConnection(event), String(folderId), { mode })
+    })
+    ipcMain.handle('work:page:link', (event, folderId: string, folderName: string) =>
+      linkWorkFolderWithDialog(pageConnection(event), String(folderId), String(folderName))
+    )
+    ipcMain.handle('work:page:openFolder', async (event, folderId: string) => {
+      const dir = await getWorkProjectPath(pageConnection(event), String(folderId))
+      if (dir) await shell.openPath(dir)
     })
 
     // Auth token relay from webview

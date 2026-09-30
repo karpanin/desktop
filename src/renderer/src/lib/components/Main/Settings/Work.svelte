@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { config, activeConnection, workEnabled } from '../../../stores'
+  import { config } from '../../../stores'
   import i18n from '../../../i18n'
   import Switch from '../../common/Switch.svelte'
 
@@ -68,8 +68,6 @@
 
   const setServerEnabled = async (value: boolean) => {
     await window.electronAPI.setWorkServerEnabled(connectionId, value)
-    // Keep the top bar Chat / Work switch in sync
-    if (connectionId === $activeConnection?.id) workEnabled.set(value)
     await loadProjects()
   }
 

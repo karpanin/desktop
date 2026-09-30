@@ -77,3 +77,8 @@ html.light {
   --ev-c-text-3: rgba(29, 29, 31, 0.4);
   color-scheme: light;
 }
+
+/* Native controls (select popups, scrollbars) follow the dark theme */
+html.dark {
+  color-scheme: dark;
+}

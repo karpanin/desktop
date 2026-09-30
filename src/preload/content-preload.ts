@@ -1,11 +1,13 @@
 import { ipcRenderer, contextBridge } from 'electron'
+import { initWorkOverlay } from './work-overlay'
 
 // ─── Desktop ↔ Open WebUI Generic Protocol ──────────────
 // This preload is a dumb relay. It passes typed {type, data}
 // messages between the embedder (desktop renderer) and the
 // Open WebUI page. Business logic lives elsewhere.
-// To add new features, just add new event types — this file
-// never needs to change.
+// To add new features, just add new event types.  The one
+// exception is the Work mode switch, which is desktop UI drawn
+// over the page (see work-overlay.ts).
 
 type EventCallback = (data: any) => void
 const eventCallbacks: EventCallback[] = []
@@ -49,4 +51,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   load: (page: string): void => {
     ipcRenderer.sendToHost('webview:load', page)
   }
+})
+
+// ─── Work mode switch (desktop UI drawn over the page) ──
+// Navigates through Open WebUI's own desktop protocol (page:navigate),
+// i.e. a client-side route change without a reload.
+initWorkOverlay({
+  navigate: (path) => eventCallbacks.forEach((cb) => cb({ type: 'page:navigate', data: { path } }))
 })
