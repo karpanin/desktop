@@ -6,6 +6,7 @@
   import OpenWebUI from './Settings/OpenWebUI.svelte'
   import Connections from './Settings/Connections.svelte'
   import OpenTerminal from './Settings/OpenTerminal.svelte'
+  import Work from './Settings/Work.svelte'
   import InferenceRuntime from './Settings/InferenceRuntime.svelte'
   import Models from './Settings/Models.svelte'
   import About from './Settings/About.svelte'
@@ -36,6 +37,11 @@
       id: 'terminal',
       label: () => $i18n.t('settings.tabs.terminal'),
       icon: 'M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z'
+    },
+    {
+      id: 'work',
+      label: () => $i18n.t('settings.tabs.work'),
+      icon: 'M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z'
     },
     {
       id: 'inference',
@@ -134,6 +140,8 @@
         <Connections />
       {:else if settingsTab === 'terminal'}
         <OpenTerminal />
+      {:else if settingsTab === 'work'}
+        <Work />
       {:else if settingsTab === 'inference'}
         <InferenceRuntime />
       {:else if settingsTab === 'models'}

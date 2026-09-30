@@ -143,6 +143,7 @@
   "settings.tabs.general": "General",
   "settings.tabs.openwebui": "Open WebUI",
   "settings.tabs.terminal": "Open Terminal",
+  "settings.tabs.work": "Work",
   "settings.tabs.inference": "Inference Runtime",
   "settings.tabs.models": "Models",
   "settings.tabs.connections": "Connections",
@@ -290,5 +291,22 @@
   "settings.about.noChangelog": "No changelog entries yet.",
   "settings.about.viewOnGithub": "View on GitHub →",
   "settings.about.copyright": "Copyright (c) 2026 Open WebUI Inc. All rights reserved.",
-  "settings.about.createdBy": "Created by Timothy J. Baek"
+  "settings.about.createdBy": "Created by Timothy J. Baek",
+
+  "settings.work.enable": "Work mode",
+  "settings.work.enableDesc": "Lets models in Open WebUI read and edit files in local folders linked to your projects. Works with any model you pick in the chat.",
+  "settings.work.projects": "Projects",
+  "settings.work.projectsDesc": "Link an Open WebUI project (folder) to a folder on this computer. Chats inside the project can then work with its files.",
+  "settings.work.noConnection": "Open a connection and sign in to Open WebUI to see your projects.",
+  "settings.work.signInRequired": "Sign in to Open WebUI in this connection, then press Refresh.",
+  "settings.work.noProjects": "No projects yet. Create a folder in the Open WebUI sidebar, then press Refresh.",
+  "settings.work.notLinked": "Not linked to a local folder",
+  "settings.work.link": "Link folder…",
+  "settings.work.change": "Change…",
+  "settings.work.unlink": "Unlink",
+  "settings.work.modeRead": "Read only",
+  "settings.work.modeConfirm": "Ask before changes",
+  "settings.work.modeAuto": "Autonomous",
+  "settings.work.howTo": "How to use",
+  "settings.work.howToDesc": "1. Link a project to a local folder above.\n2. Start a chat inside that project in Open WebUI and pick any model.\n3. Ask it to work with your files — e.g. \"summarize the reports in this folder into summary.md\".\nAccess never goes outside the linked folder. In \"Ask before changes\" mode every change needs your approval."
 }

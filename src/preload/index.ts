@@ -184,6 +184,19 @@ const api = {
   // Changelog
   getChangelog: () => ipcRenderer.invoke('app:changelog'),
 
+  // Work mode
+  getWorkInfo: () => ipcRenderer.invoke('work:info'),
+  attachWorkConnection: (connectionId: string, url: string) =>
+    ipcRenderer.invoke('work:attach', connectionId, url),
+  getWorkProjects: (connectionId: string) => ipcRenderer.invoke('work:projects', connectionId),
+  linkWorkProject: (connectionId: string, folderId: string, folderName: string) =>
+    ipcRenderer.invoke('work:link', connectionId, folderId, folderName),
+  updateWorkProject: (connectionId: string, folderId: string, patch: Record<string, any>) =>
+    ipcRenderer.invoke('work:update', connectionId, folderId, patch),
+  unlinkWorkProject: (connectionId: string, folderId: string) =>
+    ipcRenderer.invoke('work:unlink', connectionId, folderId),
+  setWorkEnabled: (enabled: boolean) => ipcRenderer.invoke('work:setEnabled', enabled),
+
   // Auth token relay from webview
   setAuthToken: (token: string) => ipcRenderer.invoke('app:setAuthToken', token)
 }

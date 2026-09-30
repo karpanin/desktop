@@ -82,6 +82,18 @@ import {
   getRepoFiles
 } from './utils/huggingface'
 
+import {
+  initWork,
+  startWorkServer,
+  stopWorkServer,
+  getWorkInfo,
+  attachWorkConnection,
+  getWorkProjects,
+  linkWorkProject,
+  updateWorkProject,
+  unlinkWorkProject
+} from './utils/work'
+
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater'
 
 import log from 'electron-log'
@@ -141,6 +153,12 @@ if (gpuSandboxDisabled) {
   log.info('GPU sandbox disabled due to previous GPU process crash')
   app.commandLine.appendSwitch('disable-gpu-sandbox')
 }
+
+// Work mode: the Open WebUI page (possibly served over https from a
+// remote host) calls the local files server on 127.0.0.1.  Chromium's
+// Local Network Access checks would block or prompt for that; the
+// server itself only accepts the connection's origin + an API key.
+app.commandLine.appendSwitch('disable-features', 'LocalNetworkAccessChecks')
 
 // Prevent Chromium from permanently blocking WebGL / 3-D APIs after
 // repeated GPU process crashes within the same session.
@@ -1601,6 +1619,38 @@ if (!gotTheLock) {
       }
     })
 
+    // Work mode
+    ipcMain.handle('work:info', () => getWorkInfo())
+    ipcMain.handle('work:attach', (_event, connectionId: string, url: string) =>
+      attachWorkConnection(connectionId, url)
+    )
+    ipcMain.handle('work:projects', (_event, connectionId: string) => getWorkProjects(connectionId))
+    ipcMain.handle(
+      'work:link',
+      async (_event, connectionId: string, folderId: string, folderName: string) => {
+        const result = await dialog.showOpenDialog(mainWindow!, {
+          title: `Link "${folderName}" to a local folder`,
+          properties: ['openDirectory', 'createDirectory']
+        })
+        const dir = result.canceled ? null : (result.filePaths[0] ?? null)
+        if (dir) await linkWorkProject(connectionId, folderId, folderName, dir)
+        return dir
+      }
+    )
+    ipcMain.handle('work:update', (_event, connectionId: string, folderId: string, patch: any) =>
+      updateWorkProject(connectionId, folderId, patch)
+    )
+    ipcMain.handle('work:unlink', (_event, connectionId: string, folderId: string) =>
+      unlinkWorkProject(connectionId, folderId)
+    )
+    ipcMain.handle('work:setEnabled', async (_event, enabled: boolean) => {
+      const config = await getConfig()
+      await setConfig({ work: { ...(config.work ?? {}), enabled } })
+      if (enabled) await startWorkServer()
+      else await stopWorkServer()
+      return getWorkInfo()
+    })
+
     // Auth token relay from webview
     ipcMain.handle('app:setAuthToken', (_event, token: string) => {
       AUTH_TOKEN = token || null
@@ -2184,6 +2234,11 @@ if (!gotTheLock) {
       log.info('Migrated legacy local connection entry from connections array')
     }
 
+    // Work mode local files server — started before any webview loads so
+    // attach/registration can happen as soon as a connection opens
+    initWork({ getWindow: () => mainWindow, emit: sendToRenderer })
+    await startWorkServer().catch((err) => log.error('Failed to start work server:', err))
+
     // Check if already configured, auto-connect to default
     const defaultConn = await getDefaultConnection()
     if (defaultConn) {
@@ -2218,6 +2273,7 @@ if (!gotTheLock) {
     isQuiting = true
     await stopLlamaCpp()
     await stopOpenTerminal()
+    await stopWorkServer()
     await stopServerHandler()
     globalShortcut.unregisterAll()
     mainWindow = null

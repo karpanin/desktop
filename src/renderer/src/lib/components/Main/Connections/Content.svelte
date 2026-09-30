@@ -56,6 +56,10 @@
 
   let showGetStartedModal = $state(false)
 
+  // Requests the Open WebUI page may make through window.electronAPI.send().
+  // Anything not listed here is answered with `undefined`.
+  const WEBVIEW_REQUEST_HANDLERS: Record<string, (request: any) => any> = {}
+
   const isInitializing = $derived($appState === 'initializing')
   const insufficientStorage = $derived(
     $appState?.startsWith('insufficient-storage:')
@@ -141,6 +145,11 @@
         wv.addEventListener('did-stop-loading', () => {
           webviewLoading.set(connId, false)
           webviewLoading = new Map(webviewLoading)
+
+          // Let the Work mode files server register itself with this
+          // connection once the user is signed in
+          const pageUrl = wv.getURL?.() || openConnections.get(connId)
+          if (pageUrl?.startsWith('http')) window.electronAPI.attachWorkConnection?.(connId, pageUrl)
         })
 
         // Track load failures so we can show an error overlay
@@ -200,8 +209,12 @@
               return
             }
 
+            // Only an explicit allowlist is reachable from the web page —
+            // the renderer API also exposes file-system and process control
+            // (Work mode, Open Terminal, …) that a page must never call.
             try {
-              const response = await window.electronAPI[requestData.type]?.(requestData)
+              const handler = WEBVIEW_REQUEST_HANDLERS[requestData.type]
+              const response = handler ? await handler(requestData) : undefined
               if (requestData._requestId) {
                 wv.send('desktop:response', {
                   _responseId: requestData._requestId,

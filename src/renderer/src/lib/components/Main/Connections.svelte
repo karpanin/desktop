@@ -443,6 +443,18 @@
         return
       }
 
+      // ── Work mode ─────────────────────────────────────
+      if (data.type === 'work:reload' && data.data?.connectionId) {
+        // Open WebUI reads terminal servers on startup — reload once after
+        // the local files server has been registered in user settings
+        const wv = document.querySelector(
+          `webview[partition="persist:connection-${data.data.connectionId}"]`
+        ) as any
+        wv?.reload?.()
+        return
+      }
+      if (data.type?.startsWith('work:')) return
+
       // ── Everything else → broadcast to all webviews ───
       sendToWebview(data)
     })
