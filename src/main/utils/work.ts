@@ -259,16 +259,37 @@ const getChatFolderId = async (connectionId: string, chatId: string): Promise<st
   return folderId
 }
 
-const readTerminalServers = async (connectionId: string): Promise<any[]> => {
+const readUiSettings = async (connectionId: string): Promise<Record<string, any>> => {
   const settings = await owuiFetch(connectionId, '/api/v1/users/user/settings?raw=true')
-  return settings?.ui?.terminalServers ?? []
+  return settings?.ui ?? {}
 }
 
-const saveTerminalServers = (connectionId: string, servers: any[]) =>
+const readTerminalServers = async (connectionId: string): Promise<any[]> =>
+  (await readUiSettings(connectionId)).terminalServers ?? []
+
+const saveTerminalServers = (
+  connectionId: string,
+  servers: any[],
+  extra: Record<string, any> = {}
+) =>
   owuiFetch(connectionId, '/api/v1/users/user/settings/update', {
     method: 'POST',
-    body: JSON.stringify({ ui: { terminalServers: servers } })
+    body: JSON.stringify({ ui: { terminalServers: servers, ...extra } })
   })
+
+// Open WebUI shows admins its "What's new" modal on every page load until
+// the version is recorded as seen — which only its buttons do, not Esc or a
+// click outside.  The Chat / Work switch reloads the page, so a dismissed
+// modal would pop up on every switch.  It has already been shown this
+// session, so record it as seen along with the switch.
+const changelogSeenPatch = async (connectionId: string, ui: Record<string, any>) => {
+  try {
+    const config = await owuiFetch(connectionId, '/api/config')
+    return config?.version && ui.version !== config.version ? { version: config.version } : {}
+  } catch {
+    return {}
+  }
+}
 
 // Register this server as a user-level terminal server in the user's
 // Open WebUI settings.  Field-level patch — other settings are untouched.
@@ -311,12 +332,13 @@ export const getWorkServerEnabled = async (connectionId: string): Promise<boolea
 // so the file panel works right away.
 export const setWorkServerEnabled = async (connectionId: string, enabled: boolean) => {
   await ensureRegistered(connectionId)
-  const servers = await readTerminalServers(connectionId)
+  const ui = await readUiSettings(connectionId)
   await saveTerminalServers(
     connectionId,
-    servers.map((s) =>
+    (ui.terminalServers ?? []).map((s) =>
       s?.desktop_work ? { ...s, enabled } : enabled ? { ...s, enabled: false } : s
-    )
+    ),
+    await changelogSeenPatch(connectionId, ui)
   )
 
   // Open WebUI restores the selected terminal from localStorage on load
