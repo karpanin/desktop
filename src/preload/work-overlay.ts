@@ -151,6 +151,22 @@ type PageState = {
   context: { folderId: string; folderName: string; project: Project | null } | null
   projects: { id: string; name: string; parentId: string | null; path: string | null }[]
   python?: { state: 'missing' | 'installing' | 'ready' | 'failed'; message?: string }
+  chatId?: string | null
+  chat?: ChatState | null
+  approvals?: Approval[]
+}
+type ChatState = {
+  plan: { step: string; status: 'pending' | 'in_progress' | 'completed' }[]
+  explanation?: string
+  activity: { time: number; action: string; status: string; files?: string[] }[]
+}
+type Approval = {
+  id: string
+  chatId: string
+  action: string
+  project: string
+  root: string
+  view: any
 }
 
 const STRINGS = {
@@ -173,7 +189,29 @@ const STRINGS = {
     from: 'from "{name}"',
     preparing: 'Preparing tools…',
     preparingHint: 'Setting up Python for documents (once, a few minutes): {message}',
-    setupFailed: 'Tools setup failed — retry'
+    setupFailed: 'Tools setup failed — retry',
+    plan: 'Plan',
+    recent: 'Recent actions',
+    allDone: 'Done',
+    actions: '{n} actions',
+    approveChange: 'Allow this change?',
+    approveScript: 'Allow this script to run?',
+    allow: 'Allow',
+    allowChat: 'Allow for this chat',
+    deny: 'Deny',
+    newFile: 'New file {path}',
+    overwriteFile: 'Replaces {path}',
+    editFile: 'Edit {path}',
+    createFolder: 'Create folder {path}',
+    trash: 'Move to trash: {path}',
+    moveTo: 'Move {path} → {to}',
+    copyTo: 'Copy {path} → {to}',
+    scriptNote: 'The script can only change files in the project folder.',
+    morePending: '+{n} more waiting',
+    st_done: 'done',
+    st_failed: 'failed',
+    st_declined: 'declined',
+    st_blocked: 'blocked (read only)'
   },
   ru: {
     chat: 'Чат',
@@ -194,13 +232,36 @@ const STRINGS = {
     from: 'из «{name}»',
     preparing: 'Подготовка инструментов…',
     preparingHint: 'Устанавливается Python для документов (один раз, несколько минут): {message}',
-    setupFailed: 'Не удалось подготовить инструменты — повторить'
+    setupFailed: 'Не удалось подготовить инструменты — повторить',
+    plan: 'План',
+    recent: 'Последние действия',
+    allDone: 'Готово',
+    actions: 'Действий: {n}',
+    approveChange: 'Разрешить изменение?',
+    approveScript: 'Разрешить запуск скрипта?',
+    allow: 'Разрешить',
+    allowChat: 'Разрешить до конца чата',
+    deny: 'Отклонить',
+    newFile: 'Новый файл {path}',
+    overwriteFile: 'Заменит {path}',
+    editFile: 'Правка {path}',
+    createFolder: 'Создать папку {path}',
+    trash: 'В корзину: {path}',
+    moveTo: 'Переместить {path} → {to}',
+    copyTo: 'Скопировать {path} → {to}',
+    scriptNote: 'Скрипт может менять файлы только в папке проекта.',
+    morePending: 'ещё {n} в очереди',
+    st_done: 'выполнено',
+    st_failed: 'ошибка',
+    st_declined: 'отклонено',
+    st_blocked: 'запрещено (только чтение)'
   }
 }
 
 const CSS = `
 :host { all: initial; }
 * { box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--fg); }
 .bar { display: flex; align-items: center; gap: 8px; color: var(--fg); }
 .seg { display: flex; padding: 3px; border-radius: 999px; background: var(--seg); }
 .seg button { border: 0; background: transparent; color: var(--muted); padding: 5px 14px; border-radius: 999px;
@@ -229,8 +290,40 @@ svg { flex-shrink: 0; }
 .busy { opacity: .6; pointer-events: none; }
 .status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); padding: 6px 4px; }
 .status button { border: 0; background: var(--seg); color: var(--fg); padding: 6px 10px; border-radius: 999px; font-size: 12px; cursor: pointer; }
-.spin { width: 11px; height: 11px; border: 1.5px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin .9s linear infinite; }
+.spin { display: inline-block; flex-shrink: 0; width: 11px; height: 11px; border: 1.5px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.step { display: flex; align-items: flex-start; gap: 8px; padding: 5px 10px; font-size: 13px; line-height: 18px; }
+.step .icon { width: 14px; flex-shrink: 0; text-align: center; color: var(--muted); }
+.step.completed { color: var(--muted); }
+.step.completed .text { text-decoration: line-through; }
+.step.in_progress { font-weight: 600; }
+.step .spin { margin-top: 3px; }
+.act { display: flex; gap: 8px; padding: 4px 10px; font-size: 12px; line-height: 17px; }
+.act .time { color: var(--muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.act .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act.failed .st, .act.declined .st, .act.blocked .st { color: var(--del-fg); }
+.act .st { color: var(--muted); flex-shrink: 0; }
+.progress-bar { height: 3px; border-radius: 2px; background: var(--seg); margin: 4px 10px 6px; overflow: hidden; }
+.progress-bar > div { height: 100%; background: var(--fg); opacity: .55; }
+.card { width: min(520px, calc(100vw - 32px)); background: var(--menu); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 16px; box-shadow: 0 10px 34px rgba(0,0,0,.32); padding: 14px; }
+.card-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.card-sub { font-size: 12px; color: var(--muted); margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-line { font-size: 13px; margin: 2px 0 8px; word-break: break-all; }
+.preview { max-height: 260px; overflow: auto; border-radius: 10px; background: var(--seg); padding: 8px 0;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }
+.preview, .preview * { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+.preview div { padding: 0 10px; }
+.preview .del { background: var(--del-bg); color: var(--del-fg); }
+.preview .add { background: var(--add-bg); color: var(--add-fg); }
+.preview .gap { height: 8px; }
+.card-note { font-size: 11px; color: var(--muted); margin-top: 8px; }
+.card-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; }
+.card-actions .more { margin-right: auto; font-size: 11px; color: var(--muted); }
+.card-actions button { border: 0; border-radius: 999px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+  background: var(--seg); color: var(--fg); }
+.card-actions button:hover { background: var(--hover); }
+.card-actions button.primary { background: var(--primary-bg); color: var(--primary-fg); }
 `
 
 const THEMES = {
@@ -241,7 +334,13 @@ const THEMES = {
     '--on': '#ffffff',
     '--hover': 'rgba(0,0,0,.07)',
     '--menu': '#ffffff',
-    '--border': 'rgba(0,0,0,.08)'
+    '--border': 'rgba(0,0,0,.08)',
+    '--del-bg': 'rgba(220,38,38,.08)',
+    '--del-fg': '#b42318',
+    '--add-bg': 'rgba(22,163,74,.09)',
+    '--add-fg': '#157f3c',
+    '--primary-bg': '#171717',
+    '--primary-fg': '#ffffff'
   },
   dark: {
     '--fg': '#ececec',
@@ -250,7 +349,13 @@ const THEMES = {
     '--on': 'rgba(255,255,255,.16)',
     '--hover': 'rgba(255,255,255,.09)',
     '--menu': '#212121',
-    '--border': 'rgba(255,255,255,.08)'
+    '--border': 'rgba(255,255,255,.08)',
+    '--del-bg': 'rgba(248,113,113,.14)',
+    '--del-fg': '#ff9d9d',
+    '--add-bg': 'rgba(74,222,128,.12)',
+    '--add-fg': '#86efac',
+    '--primary-bg': '#ececec',
+    '--primary-fg': '#171717'
   }
 }
 
@@ -273,7 +378,7 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
   let host: HTMLDivElement | null = null
   let root: ShadowRoot | null = null
   let state: PageState | null = null
-  let menuOpen = false
+  let openMenu: null | 'project' | 'progress' = null
   let busy = false
   let lastUrl = ''
   let lastFetch = 0
@@ -414,9 +519,137 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
     return ''
   }
 
+  // Plan (update_plan) and recent file actions of the current chat
+  const progressChipHtml = () => {
+    const chat = state?.chat
+    if (!chat || (!chat.plan.length && !chat.activity.length)) return ''
+    let label: string
+    if (chat.plan.length) {
+      const done = chat.plan.filter((s) => s.status === 'completed').length
+      const current = chat.plan.find((s) => s.status === 'in_progress')
+      const icon = current ? '<span class="spin"></span>' : done === chat.plan.length ? '✓' : '○'
+      label =
+        `${icon}<span class="text">${done}/${chat.plan.length} · ` +
+        `${escape(current?.step ?? (done === chat.plan.length ? t('allDone') : chat.plan[0].step))}</span>`
+    } else {
+      label = `<span class="text">${escape(t('actions', { n: String(chat.activity.length) }))}</span>`
+    }
+    return (
+      `<div class="chip"><button data-action="progress">${label}${CHEVRON}</button>` +
+      (openMenu === 'progress' ? `<div class="menu">${progressMenuHtml(chat)}</div>` : '') +
+      `</div>`
+    )
+  }
+
+  const progressMenuHtml = (chat: ChatState) => {
+    let html = ''
+    if (chat.plan.length) {
+      const done = chat.plan.filter((s) => s.status === 'completed').length
+      html +=
+        `<div class="label">${escape(t('plan'))} · ${done}/${chat.plan.length}</div>` +
+        `<div class="progress-bar"><div style="width:${Math.round((done / chat.plan.length) * 100)}%"></div></div>` +
+        (chat.explanation ? `<div class="note">${escape(chat.explanation)}</div>` : '') +
+        chat.plan
+          .map((s) => {
+            const icon =
+              s.status === 'completed'
+                ? '✓'
+                : s.status === 'in_progress'
+                  ? '<span class="spin"></span>'
+                  : '○'
+            return `<div class="step ${s.status}"><span class="icon">${icon}</span><span class="text">${escape(s.step)}</span></div>`
+          })
+          .join('')
+    }
+    if (chat.activity.length) {
+      if (html) html += '<div class="sep"></div>'
+      html +=
+        `<div class="label">${escape(t('recent'))}</div>` +
+        chat.activity
+          .slice(-8)
+          .reverse()
+          .map((a) => {
+            const time = new Date(a.time).toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit'
+            })
+            const st = t(`st_${a.status}` as 'st_done')
+            const files = a.files?.length ? ` — ${a.files.join(', ')}` : ''
+            return (
+              `<div class="act ${escape(a.status)}" title="${escape(a.action + files)}"><span class="time">${time}</span>` +
+              `<span class="what">${escape(a.action)}</span><span class="st">${escape(st)}</span></div>`
+            )
+          })
+          .join('')
+    }
+    return html
+  }
+
+  // Approval card: what the agent wants to change, with a diff / the script
+  const approvalHtml = () => {
+    const approvals = state?.approvals ?? []
+    if (!approvals.length) return ''
+    const a = approvals[0]
+    const v = a.view ?? {}
+    const lines = (text: string, cls: string, sign: string) =>
+      String(text ?? '')
+        .split('\n')
+        .map((l) => `<div class="${cls}">${sign}${escape(l) || ' '}</div>`)
+        .join('')
+    let title = t('approveChange')
+    let line = escape(a.action)
+    let previewHtml = ''
+    let note = ''
+    switch (v.kind) {
+      case 'write':
+        line = escape(t(v.overwrite ? 'overwriteFile' : 'newFile', { path: v.path }))
+        previewHtml = lines(v.content, 'add', '+ ')
+        break
+      case 'edit':
+        line = escape(t('editFile', { path: v.path }))
+        previewHtml = (v.diff ?? [])
+          .map((d: any) => lines(d.before, 'del', '− ') + lines(d.after, 'add', '+ '))
+          .join('<div class="gap"></div>')
+        break
+      case 'script':
+        title = t('approveScript')
+        line = escape(v.description || a.action)
+        previewHtml = lines(v.code, '', '')
+        note = t('scriptNote')
+        break
+      case 'folder':
+        line = escape(t('createFolder', { path: v.path }))
+        break
+      case 'delete':
+        line = escape(t('trash', { path: v.path }))
+        break
+      case 'move':
+      case 'copy':
+        line = escape(t(v.kind === 'move' ? 'moveTo' : 'copyTo', { path: v.path, to: v.to }))
+        break
+    }
+    return (
+      `<div class="card" role="dialog" aria-modal="false">` +
+      `<div class="card-title">${escape(title)}</div>` +
+      `<div class="card-sub">${FOLDER_ICON} ${escape(a.project)} · ${escape(a.root)}</div>` +
+      `<div class="card-line">${line}</div>` +
+      (previewHtml ? `<div class="preview">${previewHtml}</div>` : '') +
+      (note ? `<div class="card-note">${escape(note)}</div>` : '') +
+      `<div class="card-actions">` +
+      (approvals.length > 1
+        ? `<span class="more">${escape(t('morePending', { n: String(approvals.length - 1) }))}</span>`
+        : '') +
+      `<button data-action="approve" data-arg="deny">${escape(t('deny'))}</button>` +
+      `<button data-action="approve" data-arg="allow-chat">${escape(t('allowChat'))}</button>` +
+      `<button class="primary" data-action="approve" data-arg="allow">${escape(t('allow'))}</button>` +
+      `</div></div>`
+    )
+  }
+
   const render = () => {
-    const visible = state?.enabled !== null && state !== null && isChatRoute(location.pathname)
-    if (!visible) {
+    const showBar = state !== null && state.enabled !== null && isChatRoute(location.pathname)
+    const approval = approvalHtml()
+    if (!showBar && !approval) {
       if (host) host.style.display = 'none'
       return
     }
@@ -426,19 +659,26 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
     host!.style.display = ''
     const work = state!.enabled === true
     root!.innerHTML =
-      `<style>${CSS}</style><div class="bar ${busy ? 'busy' : ''}">` +
-      `<div class="seg" role="radiogroup">` +
-      `<button class="${work ? '' : 'on'}" data-action="chat" role="radio" aria-checked="${!work}">${escape(t('chat'))}</button>` +
-      `<button class="${work ? 'on' : ''}" data-action="work" role="radio" aria-checked="${work}">${escape(t('work'))}</button>` +
-      `</div>` +
-      (work
-        ? `<div class="chip"><button data-action="menu">${chipLabel()}</button>` +
-          (menuOpen ? `<div class="menu">${menuHtml()}</div>` : '') +
-          `</div>` +
-          pythonStatusHtml()
-        : '') +
+      `<style>${CSS}</style><div class="wrap">` +
+      (showBar ? barHtml(work) : '') +
+      approval +
       `</div>`
   }
+
+  const barHtml = (work: boolean) =>
+    `<div class="bar ${busy ? 'busy' : ''}">` +
+    `<div class="seg" role="radiogroup">` +
+    `<button class="${work ? '' : 'on'}" data-action="chat" role="radio" aria-checked="${!work}">${escape(t('chat'))}</button>` +
+    `<button class="${work ? 'on' : ''}" data-action="work" role="radio" aria-checked="${work}">${escape(t('work'))}</button>` +
+    `</div>` +
+    (work
+      ? `<div class="chip"><button data-action="menu">${chipLabel()}</button>` +
+        (openMenu === 'project' ? `<div class="menu">${menuHtml()}</div>` : '') +
+        `</div>` +
+        progressChipHtml() +
+        pythonStatusHtml()
+      : '') +
+    `</div>`
 
   const refresh = async () => {
     lastFetch = Date.now()
@@ -467,25 +707,36 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
     switch (action) {
       case 'chat':
       case 'work':
-        menuOpen = false
+        openMenu = null
         // Saved in Open WebUI; the desktop reloads the page to apply it
         if ((state?.enabled === true) !== (action === 'work')) {
           run(() => ipcRenderer.invoke('work:page:setEnabled', action === 'work'))
         }
         return
       case 'menu':
-        menuOpen = !menuOpen
+      case 'progress': {
+        const menu = action === 'menu' ? 'project' : 'progress'
+        openMenu = openMenu === menu ? null : menu
         render()
         return
+      }
+      case 'approve': {
+        const approval = state?.approvals?.[0]
+        if (!approval) return
+        state!.approvals = state!.approvals!.filter((a) => a.id !== approval.id)
+        ipcRenderer.invoke('work:page:approval', approval.id, arg).catch(() => {})
+        render()
+        return
+      }
       case 'open-project':
-        menuOpen = false
+        openMenu = null
         options.navigate(`/folders/${encodeURIComponent(arg)}`)
         render()
         return
       case 'link': {
         if (!ctx) return
         const target = ctx.project ?? { folderId: ctx.folderId, folderName: ctx.folderName }
-        menuOpen = false
+        openMenu = null
         run(() => ipcRenderer.invoke('work:page:link', target.folderId, target.folderName))
         return
       }
@@ -495,7 +746,7 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
         return
       case 'open-folder':
         if (!ctx?.project) return
-        menuOpen = false
+        openMenu = null
         ipcRenderer.invoke('work:page:openFolder', ctx.project.folderId).catch(() => {})
         render()
         return
@@ -509,10 +760,24 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
 
   // Pushed by the main process (Python setup progress, …)
   ipcRenderer.on('work:event', (_event, message: { type: string; data: any }) => {
-    if (message?.type === 'work:python' && state) {
-      state.python = message.data
+    const { type, data } = message ?? {}
+    if (type === 'work:approval') {
+      // Tell the desktop the card is shown (otherwise it falls back to a dialog)
+      ipcRenderer.invoke('work:page:approvalAck', data.id).catch(() => {})
+      if (!state) return
+      state.approvals = [...(state.approvals ?? []).filter((a) => a.id !== data.id), data]
       render()
+      return
     }
+    if (!state) return
+    if (type === 'work:python') state.python = data
+    else if (type === 'work:approvalDone') {
+      state.approvals = (state.approvals ?? []).filter((a) => a.id !== data.id)
+    } else if (type === 'work:chat') {
+      if (data.chatId !== state.chatId) return
+      state.chat = data.chat
+    } else return
+    render()
   })
 
   const start = () => {
@@ -520,16 +785,16 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
     document.addEventListener(
       'mousedown',
       (e) => {
-        if (menuOpen && e.target !== host) {
-          menuOpen = false
+        if (openMenu && e.target !== host) {
+          openMenu = null
           render()
         }
       },
       true
     )
     document.addEventListener('keydown', (e) => {
-      if (menuOpen && e.key === 'Escape') {
-        menuOpen = false
+      if (openMenu && e.key === 'Escape') {
+        openMenu = null
         render()
       }
     })
@@ -547,7 +812,7 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
       if (host && !host.isConnected) render()
       if (location.href !== lastUrl) {
         lastUrl = location.href
-        menuOpen = false
+        openMenu = null
         refresh()
       } else if (!state && Date.now() - lastFetch > 3000) {
         refresh() // not signed in / not registered yet

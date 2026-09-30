@@ -112,8 +112,8 @@ export const initWork = (options: {
 
 // Push an event to the Work overlay of every open connection page
 // (webview preload, see work-overlay.ts)
-const pushToPages = (type: string, data?: any) => {
-  const sessions = [...attached.keys()].map(connectionSession)
+const pushToPages = (type: string, data?: any, connectionId?: string) => {
+  const sessions = (connectionId ? [connectionId] : [...attached.keys()]).map(connectionSession)
   for (const contents of webContents.getAllWebContents()) {
     try {
       if (contents.isDestroyed() || contents.getType() !== 'webview') continue
@@ -580,7 +580,22 @@ export const getWorkPageState = async (connectionId: string, pageUrl: string) =>
   }
   // Work mode needs the scripting environment — set it up in the background
   if (enabled && getWorkPythonStatus().state === 'missing') ensureWorkPython().catch(() => {})
-  return { enabled, context, projects, python: getWorkPythonStatus() }
+  const chatId = (() => {
+    try {
+      return new URL(pageUrl).pathname.match(/\/c\/([^/?#]+)/)?.[1] ?? null
+    } catch {
+      return null
+    }
+  })()
+  return {
+    enabled,
+    context,
+    projects,
+    python: getWorkPythonStatus(),
+    chatId,
+    chat: chatId ? (chatStates.get(`${connectionId}:${decodeURIComponent(chatId)}`) ?? null) : null,
+    approvals: pendingApprovalsFor(connectionId)
+  }
 }
 
 // ─── Path Sandboxing ────────────────────────────────────
@@ -688,6 +703,66 @@ const notLinkedError = () =>
   )
 
 // ─── Approvals ──────────────────────────────────────────
+// Asked in the page (a card under the Chat / Work switch, with a diff or
+// the script) — or, when no page answers, with a native dialog.
+
+// What the approval card shows
+export type ApprovalView =
+  | { kind: 'write'; path: string; content: string; overwrite: boolean }
+  | { kind: 'edit'; path: string; diff: { before: string; after: string }[] }
+  | { kind: 'script'; description: string; code: string }
+  | { kind: 'folder' | 'delete'; path: string }
+  | { kind: 'move' | 'copy'; path: string; to: string }
+
+type Decision = 'allow' | 'allow-chat' | 'deny'
+
+const pendingApprovals = new Map<
+  string,
+  { connectionId: string; payload: any; acked: boolean; resolve: (d: Decision | null) => void }
+>()
+
+const PAGE_ACK_TIMEOUT = 2500
+
+const askInPage = (connectionId: string, payload: any): Promise<Decision | null> =>
+  new Promise((resolve) => {
+    const id = crypto.randomUUID()
+    const entry = {
+      connectionId,
+      payload: { ...payload, id },
+      acked: false,
+      resolve: (decision: Decision | null) => {
+        if (!pendingApprovals.delete(id)) return
+        pushToPages('work:approvalDone', { id }, connectionId)
+        resolve(decision)
+      }
+    }
+    pendingApprovals.set(id, entry)
+    pushToPages('work:approval', entry.payload, connectionId)
+    // No overlay answered (page loading, closed) → native dialog
+    setTimeout(() => {
+      if (!entry.acked) entry.resolve(null)
+    }, PAGE_ACK_TIMEOUT)
+  })
+
+// From the overlay (work:page:approvalAck / work:page:approval)
+export const ackWorkApproval = (connectionId: string, id: string) => {
+  const entry = pendingApprovals.get(id)
+  if (entry && entry.connectionId === connectionId) entry.acked = true
+}
+
+export const answerWorkApproval = (connectionId: string, id: string, decision: string) => {
+  const entry = pendingApprovals.get(id)
+  if (!entry || entry.connectionId !== connectionId) return
+  entry.resolve(decision === 'allow' || decision === 'allow-chat' ? decision : 'deny')
+}
+
+const pendingApprovalsFor = (connectionId: string) =>
+  [...pendingApprovals.values()]
+    .filter((a) => a.connectionId === connectionId)
+    .map((a) => {
+      a.acked = true // shown again after a reload
+      return a.payload
+    })
 
 let approvalQueue: Promise<unknown> = Promise.resolve()
 
@@ -696,32 +771,85 @@ const requestApproval = (
   chatId: string,
   ws: Workspace,
   action: string,
-  detail: string
+  detail: string,
+  view?: ApprovalView
 ): Promise<boolean> => {
   const chatKey = `${connectionId}:${chatId}`
   if (ws.project.mode === 'auto' || chatApprovals.has(chatKey)) return Promise.resolve(true)
 
-  // One dialog at a time — parallel tool calls queue up
+  // One question at a time — parallel tool calls queue up
   const run = async () => {
     if (chatApprovals.has(chatKey)) return true
     const win = getWindow()
-    win?.show()
-    const { response } = await dialog.showMessageBox(win ?? undefined, {
-      type: 'question',
-      buttons: ['Allow', 'Allow for this chat', 'Deny'],
-      defaultId: 0,
-      cancelId: 2,
-      noLink: true,
-      title: 'Open WebUI — Work',
-      message: `${action}`,
-      detail: `Project: ${ws.project.folderName}\nFolder: ${ws.root}\n\n${detail}`.slice(0, 4000)
+    if (win && (win.isMinimized() || !win.isVisible())) win.show()
+
+    let decision = await askInPage(connectionId, {
+      chatId,
+      action,
+      project: ws.project.folderName,
+      root: ws.root,
+      view: view ?? null
     })
-    if (response === 1) chatApprovals.add(chatKey)
-    return response !== 2
+    if (decision === null) {
+      const { response } = await dialog.showMessageBox(win ?? undefined, {
+        type: 'question',
+        buttons: ['Allow', 'Allow for this chat', 'Deny'],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true,
+        title: 'Open WebUI — Work',
+        message: `${action}`,
+        detail: `Project: ${ws.project.folderName}\nFolder: ${ws.root}\n\n${detail}`.slice(0, 4000)
+      })
+      decision = (['allow', 'allow-chat', 'deny'] as const)[response]
+    }
+    if (decision === 'allow-chat') chatApprovals.add(chatKey)
+    return decision !== 'deny'
   }
   const result = approvalQueue.then(run, run)
   approvalQueue = result.catch(() => {})
   return result
+}
+
+// ─── Plan & activity per chat ───────────────────────────
+// update_plan (the model's step list) and what it did to files, shown in
+// the progress chip next to the Chat / Work switch.
+
+export type PlanStep = { step: string; status: 'pending' | 'in_progress' | 'completed' }
+type ActivityEntry = {
+  time: number
+  action: string
+  status: 'done' | 'failed' | 'declined' | 'blocked'
+  files?: string[]
+}
+type ChatState = { plan: PlanStep[]; explanation?: string; activity: ActivityEntry[] }
+
+const MAX_CHATS = 200
+const chatStates = new Map<string, ChatState>()
+
+const chatState = (connectionId: string, chatId: string): ChatState => {
+  const key = `${connectionId}:${chatId}`
+  let state = chatStates.get(key)
+  if (!state) {
+    state = { plan: [], activity: [] }
+    chatStates.set(key, state)
+    if (chatStates.size > MAX_CHATS) chatStates.delete(chatStates.keys().next().value)
+  }
+  return state
+}
+
+const publishChat = (connectionId: string, chatId: string) =>
+  pushToPages('work:chat', { chatId, chat: chatState(connectionId, chatId) }, connectionId)
+
+const recordActivity = (
+  connectionId: string,
+  chatId: string,
+  entry: Omit<ActivityEntry, 'time'>
+) => {
+  if (!chatId) return
+  const state = chatState(connectionId, chatId)
+  state.activity = [...state.activity, { ...entry, time: Date.now() }].slice(-30)
+  publishChat(connectionId, chatId)
 }
 
 const preview = (text: string, lines = 15): string => {
@@ -1196,6 +1324,35 @@ const openApiSpec = () => ({
         )
       }
     },
+    '/tools/update_plan': {
+      post: {
+        operationId: 'update_plan',
+        summary: 'Show your plan to the user',
+        description:
+          'Show the user your step-by-step plan for a multi-step task and keep it current. Call it ' +
+          'before starting (all steps pending, the first in_progress), then again whenever a step ' +
+          'is completed or the plan changes — always send the full list. Keep exactly one step ' +
+          'in_progress. Skip it for simple one-step requests.',
+        requestBody: jsonBody(
+          {
+            plan: {
+              type: 'array',
+              description: 'All steps in order.',
+              items: {
+                type: 'object',
+                properties: {
+                  step: str('Short step description, e.g. "Read the sales files".'),
+                  status: str('pending, in_progress or completed.')
+                },
+                required: ['step', 'status']
+              }
+            },
+            explanation: str('Optional one-sentence note on what changed.')
+          },
+          ['plan']
+        )
+      }
+    },
     '/tools/run_script': {
       post: {
         operationId: 'run_script',
@@ -1240,14 +1397,16 @@ const MODEL_TOOL_ROUTES = new Set(Object.keys(openApiSpec().paths))
 const SYSTEM_PROMPT =
   "You can work with files in a local folder on the user's computer through the Local Files tools " +
   '(get_workspace, list_files, read_file, grep_search, glob_search, write_file, replace_file_content, ' +
-  'create_directory, move_path, copy_path, delete_path, run_script, display_file). They only work when the chat ' +
+  'create_directory, move_path, copy_path, delete_path, run_script, update_plan, display_file). They only ' +
+  'work when the chat ' +
   'belongs to an Open WebUI project that the user linked to a local folder in Open WebUI Desktop. ' +
   'When the user asks about their files or documents, call get_workspace first. Use paths relative to ' +
   'the project folder. The tools enforce all access limits themselves: when the user asks for a file, ' +
   'just call the tool and report its answer briefly — never deliberate about whether a path is allowed. ' +
   'To create or edit Word, Excel, PowerPoint or PDF files, read the matching skill (docx, xlsx, pptx, ' +
   'pdf) with read_file and follow it, using run_script. If another listed skill fits the task, read ' +
-  'its SKILL.md too. Explore ' +
+  'its SKILL.md too. For tasks with several steps, show a plan with update_plan first and update ' +
+  'it as you go. Explore ' +
   'before changing anything, make focused edits, and after creating or changing a document call ' +
   "display_file so the user can review it. Some changes need the user's approval; when a tool " +
   'returns an error, do not retry the same action — explain it to the user.'
@@ -1359,8 +1518,15 @@ const routeRequest = async (
     return ws
   }
 
-  const guardWrite = async (w: Workspace, action: string, detail: string) => {
+  const guardWrite = async (
+    w: Workspace,
+    action: string,
+    detail: string,
+    view?: ApprovalView,
+    recordDone = true
+  ) => {
     if (w.project.mode === 'read') {
+      recordActivity(connectionId, chatId, { action, status: 'blocked' })
       throw new HttpError(
         403,
         'The project is read-only (set by the user in Open WebUI Desktop), so files cannot be changed. ' +
@@ -1368,15 +1534,16 @@ const routeRequest = async (
         'read_only'
       )
     }
-    const ok = await requestApproval(connectionId, chatId, w, action, detail)
+    const ok = await requestApproval(connectionId, chatId, w, action, detail, view)
     if (!ok) {
+      recordActivity(connectionId, chatId, { action, status: 'declined' })
       throw new HttpError(
         403,
         'The user declined this change. Do not retry it; ask the user how they want to proceed.',
         'declined'
       )
     }
-    emit('work:activity', { connectionId, chatId, project: w.project.folderName, action })
+    if (recordDone) recordActivity(connectionId, chatId, { action, status: 'done' })
   }
 
   // ── Skills (Agent Skills: <root>/<name>/SKILL.md) ──
@@ -1590,11 +1757,13 @@ const routeRequest = async (
     const target = await resolvePath(w, body.path)
     const exists = fs.existsSync(target)
     const content = String(body.content ?? '')
-    await guardWrite(
-      w,
-      `${exists ? 'Overwrite' : 'Create'} file ${path.relative(w.root, target)}`,
-      preview(content)
-    )
+    const rel = path.relative(w.root, target)
+    await guardWrite(w, `${exists ? 'Overwrite' : 'Create'} file ${rel}`, preview(content), {
+      kind: 'write',
+      path: rel,
+      content: preview(content, 60),
+      overwrite: exists
+    })
     await fs.promises.mkdir(path.dirname(target), { recursive: true })
     await fs.promises.writeFile(target, content, 'utf8')
     return sendJson(res, 200, { path: target, size: Buffer.byteLength(content) })
@@ -1618,12 +1787,21 @@ const routeRequest = async (
         ? content.split(r.target).join(r.replacement)
         : content.replace(r.target, () => r.replacement)
     }
+    const rel = path.relative(w.root, target)
     await guardWrite(
       w,
-      `Edit file ${path.relative(w.root, target)}`,
+      `Edit file ${rel}`,
       replacements
         .map((r: any) => `− ${preview(r.target, 5)}\n+ ${preview(r.replacement, 5)}`)
-        .join('\n\n')
+        .join('\n\n'),
+      {
+        kind: 'edit',
+        path: rel,
+        diff: replacements.slice(0, 10).map((r: any) => ({
+          before: preview(String(r.target), 30),
+          after: preview(String(r.replacement), 30)
+        }))
+      }
     )
     await fs.promises.writeFile(target, content, 'utf8')
     return sendJson(res, 200, { path: target, size: Buffer.byteLength(content) })
@@ -1633,7 +1811,8 @@ const routeRequest = async (
     const w = requireWs()
     const body = await readJson(req)
     const target = await resolvePath(w, body.path)
-    await guardWrite(w, `Create folder ${path.relative(w.root, target)}`, '')
+    const rel = path.relative(w.root, target)
+    await guardWrite(w, `Create folder ${rel}`, '', { kind: 'folder', path: rel })
     await fs.promises.mkdir(target, { recursive: true })
     return sendJson(res, 200, { path: target })
   }
@@ -1646,15 +1825,35 @@ const routeRequest = async (
     if (!fs.existsSync(source)) throw new HttpError(404, 'Source not found')
     if (fs.existsSync(destination)) throw new HttpError(409, 'Destination already exists')
     const copy = route === '/tools/copy_path'
-    await guardWrite(
-      w,
-      `${copy ? 'Copy' : 'Move'} ${path.relative(w.root, source)} → ${path.relative(w.root, destination)}`,
-      ''
-    )
+    const from = path.relative(w.root, source)
+    const to = path.relative(w.root, destination)
+    await guardWrite(w, `${copy ? 'Copy' : 'Move'} ${from} → ${to}`, '', {
+      kind: copy ? 'copy' : 'move',
+      path: from,
+      to
+    })
     await fs.promises.mkdir(path.dirname(destination), { recursive: true })
     if (copy) await fs.promises.cp(source, destination, { recursive: true })
     else await fs.promises.rename(source, destination)
     return sendJson(res, 200, { source, destination })
+  }
+
+  if (route === '/tools/update_plan' && method === 'POST') {
+    if (!chatId) throw new HttpError(400, 'No chat')
+    const body = await readJson(req)
+    const statuses = ['pending', 'in_progress', 'completed']
+    const plan: PlanStep[] = (Array.isArray(body.plan) ? body.plan : [])
+      .slice(0, 20)
+      .map((item: any) => ({
+        step: String(item?.step ?? '').slice(0, 200),
+        status: statuses.includes(item?.status) ? item.status : 'pending'
+      }))
+      .filter((item: PlanStep) => item.step)
+    const state = chatState(connectionId, chatId)
+    state.plan = plan
+    state.explanation = body.explanation ? String(body.explanation).slice(0, 500) : undefined
+    publishChat(connectionId, chatId)
+    return sendJson(res, 200, { ok: true, steps: plan.length })
   }
 
   if (route === '/tools/run_script' && method === 'POST') {
@@ -1666,9 +1865,16 @@ const routeRequest = async (
 
     // Read-only projects run scripts without write access (analysis only)
     const write = w.project.mode !== 'read'
+    const what = String(body.description ?? '').trim()
+    const action = `Run a Python script${what ? `: ${what}` : ''}`
     if (write) {
-      const what = String(body.description ?? '').trim()
-      await guardWrite(w, `Run a Python script${what ? `: ${what}` : ''}`, preview(code, 40))
+      await guardWrite(
+        w,
+        action,
+        preview(code, 40),
+        { kind: 'script', description: what, code: preview(code, 200) },
+        false
+      )
     }
     const seconds = Math.min(600, Math.max(5, Number(body.timeout_seconds) || 120))
     const result = await runWorkScript({
@@ -1678,12 +1884,18 @@ const routeRequest = async (
       readRoots: skillRoots(),
       timeoutMs: seconds * 1000
     })
+    const changed = await changedSince(w.root, result.started)
+    recordActivity(connectionId, chatId, {
+      action,
+      status: result.exit_code === 0 && !result.timed_out ? 'done' : 'failed',
+      files: changed.slice(0, 10)
+    })
     return sendJson(res, 200, {
       exit_code: result.exit_code,
       timed_out: result.timed_out,
       stdout: result.stdout,
       stderr: result.stderr,
-      changed_files: await changedSince(w.root, result.started)
+      changed_files: changed
     })
   }
 
@@ -1693,7 +1905,8 @@ const routeRequest = async (
     const target = await resolvePath(w, body.path)
     if (target === w.root) throw new HttpError(403, 'Cannot delete the project folder itself')
     if (!fs.existsSync(target)) throw new HttpError(404, 'Path not found')
-    await guardWrite(w, `Move to trash: ${path.relative(w.root, target)}`, '')
+    const rel = path.relative(w.root, target)
+    await guardWrite(w, `Move to trash: ${rel}`, '', { kind: 'delete', path: rel })
     await shell.trashItem(target)
     return sendJson(res, 200, { path: target, trashed: true })
   }

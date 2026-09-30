@@ -98,7 +98,9 @@ import {
   getWorkPageState,
   getWorkPageEntry,
   reportWorkServerEnabled,
-  getWorkProjectPath
+  getWorkProjectPath,
+  ackWorkApproval,
+  answerWorkApproval
 } from './utils/work'
 
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater'
@@ -1703,6 +1705,12 @@ if (!gotTheLock) {
     })
     ipcMain.handle('work:page:link', async (event, folderId: string, folderName: string) =>
       linkWorkFolderWithDialog(await pageConnection(event), String(folderId), String(folderName))
+    )
+    ipcMain.handle('work:page:approvalAck', async (event, id: string) =>
+      ackWorkApproval(await pageConnection(event), String(id))
+    )
+    ipcMain.handle('work:page:approval', async (event, id: string, decision: string) =>
+      answerWorkApproval(await pageConnection(event), String(id), String(decision))
     )
     ipcMain.handle('work:page:setupPython', async (event) => {
       await pageConnection(event)
