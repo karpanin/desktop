@@ -20,6 +20,12 @@ import { extractDocumentText, isExtractableDocument } from './work-documents'
 //     WebUI server never needs to reach this machine,
 //   • the built-in file browser / preview pane works against it.
 //
+// The terminal server entry is never stored in Open WebUI: the desktop's
+// webview preload adds it to the user's settings as Open WebUI loads them
+// and strips it from what Open WebUI saves (see work-overlay.ts).  So it
+// only exists in the desktop app — a regular browser never sees it, nor
+// the key.  Chat / Work (the entry's enabled flag) is kept here too.
+//
 // Each Open WebUI project (folder) can be linked to a local directory.
 // Open WebUI sends the chat id with every call (X-Session-Id), which we
 // map to the chat's folder and then to the linked directory.  Chats
@@ -43,6 +49,8 @@ export interface WorkConfig {
   port: number
   apiKey: string
   projects: Record<string, WorkProject>
+  // Chat / Work per connection: whether the Local Files terminal is on
+  serverEnabled: Record<string, boolean>
 }
 
 const DEFAULT_PORT = 39380
@@ -53,7 +61,7 @@ const MAX_WALK_ENTRIES = 50_000
 const SKIP_DIRS = new Set(['node_modules', '.git', '__pycache__', '.venv', '.DS_Store'])
 const CHAT_FOLDER_TTL = 10_000
 const FOLDERS_TTL = 30_000
-const REGISTER_RETRY_MS = 5_000
+const CLEANUP_RETRY_MS = 5_000
 const SERVER_NAME = 'Local Files (Desktop)'
 
 // ─── State ──────────────────────────────────────────────
@@ -68,10 +76,10 @@ let emit: (type: string, data?: any) => void = () => {}
 
 // connectionId → Open WebUI origin (e.g. https://chat.example.com)
 const attached = new Map<string, { url: string; origin: string }>()
-const registered = new Set<string>()
-const registering = new Set<string>()
-const reloaded = new Set<string>()
-const registerTimers = new Map<string, NodeJS.Timeout>()
+// Legacy cleanup of server-stored entries, once per connection and session
+const cleaned = new Set<string>()
+const cleaning = new Set<string>()
+const cleanupTimers = new Map<string, NodeJS.Timeout>()
 
 const chatFolderCache = new Map<string, { folderId: string | null; ts: number }>()
 const foldersCache = new Map<string, { folders: any[]; ts: number }>()
@@ -83,11 +91,7 @@ const chatApprovals = new Set<string>()
 export const getWorkInfo = () => ({
   status,
   port,
-  connections: [...attached.entries()].map(([id, c]) => ({
-    id,
-    url: c.url,
-    registered: registered.has(id)
-  }))
+  connections: [...attached.entries()].map(([id, c]) => ({ id, url: c.url }))
 })
 
 export const initWork = (options: {
@@ -105,6 +109,7 @@ const workConfig = async (): Promise<WorkConfig> => {
     port: DEFAULT_PORT,
     apiKey: '',
     projects: {},
+    serverEnabled: {},
     ...(config.work ?? {})
   }
 }
@@ -138,8 +143,7 @@ export const startWorkServer = async (): Promise<void> => {
     })
   })
 
-  // Keep the port stable across launches — it is part of the URL
-  // stored in the user's Open WebUI settings.
+  // Keep the port stable across launches — open pages hold the URL
   let candidate = config.port || DEFAULT_PORT
   for (let attempt = 0; attempt < 20; attempt++, candidate++) {
     const ok = await new Promise<boolean>((resolve) => {
@@ -162,14 +166,14 @@ export const startWorkServer = async (): Promise<void> => {
   log.info(`[work] local files server listening on http://127.0.0.1:${port}`)
 
   // Connections attached before the server started
-  for (const id of attached.keys()) scheduleRegister(id, 0)
+  for (const id of attached.keys()) scheduleCleanup(id, 0)
 }
 
 export const stopWorkServer = async (): Promise<void> => {
-  for (const t of registerTimers.values()) clearTimeout(t)
-  registerTimers.clear()
-  registered.clear()
-  registering.clear()
+  for (const t of cleanupTimers.values()) clearTimeout(t)
+  cleanupTimers.clear()
+  cleaned.clear()
+  cleaning.clear()
   if (!server) return
   await new Promise<void>((resolve) => server!.close(() => resolve()))
   server = null
@@ -179,7 +183,8 @@ export const stopWorkServer = async (): Promise<void> => {
 const baseUrlFor = (connectionId: string) =>
   `http://127.0.0.1:${port}/c/${encodeURIComponent(connectionId)}`
 
-// Called by the renderer whenever a connection's webview finishes loading.
+// Called when a connection's page loads (preload request or the renderer's
+// did-stop-loading) — enables CORS for its origin and API calls as the user.
 export const attachWorkConnection = (connectionId: string, url: string) => {
   let origin: string
   try {
@@ -187,8 +192,9 @@ export const attachWorkConnection = (connectionId: string, url: string) => {
   } catch {
     return
   }
+  if (!origin.startsWith('http')) return
   attached.set(connectionId, { url, origin })
-  if (!registered.has(connectionId)) scheduleRegister(connectionId, 0)
+  if (!cleaned.has(connectionId)) scheduleCleanup(connectionId, 0)
 }
 
 // ─── Open WebUI API (as the signed-in user) ─────────────
@@ -264,17 +270,10 @@ const readUiSettings = async (connectionId: string): Promise<Record<string, any>
   return settings?.ui ?? {}
 }
 
-const readTerminalServers = async (connectionId: string): Promise<any[]> =>
-  (await readUiSettings(connectionId)).terminalServers ?? []
-
-const saveTerminalServers = (
-  connectionId: string,
-  servers: any[],
-  extra: Record<string, any> = {}
-) =>
+const saveUiSettings = (connectionId: string, ui: Record<string, any>) =>
   owuiFetch(connectionId, '/api/v1/users/user/settings/update', {
     method: 'POST',
-    body: JSON.stringify({ ui: { terminalServers: servers, ...extra } })
+    body: JSON.stringify({ ui })
   })
 
 // Open WebUI shows admins its "What's new" modal on every page load until
@@ -282,64 +281,100 @@ const saveTerminalServers = (
 // click outside.  The Chat / Work switch reloads the page, so a dismissed
 // modal would pop up on every switch.  It has already been shown this
 // session, so record it as seen along with the switch.
-const changelogSeenPatch = async (connectionId: string, ui: Record<string, any>) => {
+const markChangelogSeen = async (connectionId: string) => {
   try {
-    const config = await owuiFetch(connectionId, '/api/config')
-    return config?.version && ui.version !== config.version ? { version: config.version } : {}
+    const [ui, config] = await Promise.all([
+      readUiSettings(connectionId),
+      owuiFetch(connectionId, '/api/config')
+    ])
+    if (config?.version && ui.version !== config.version) {
+      await saveUiSettings(connectionId, { version: config.version })
+    }
   } catch {
-    return {}
+    // Not signed in / offline — nothing to do
   }
 }
 
-// Register this server as a user-level terminal server in the user's
-// Open WebUI settings.  Field-level patch — other settings are untouched.
-// Open WebUI allows only one active terminal, so once our entry exists we
-// never flip its `enabled` flag here: the user may have switched to
-// another terminal on purpose.  setWorkServerEnabled() does that on request.
-const ensureRegistered = async (connectionId: string): Promise<'ok' | 'changed'> => {
-  const url = baseUrlFor(connectionId)
-  const servers = await readTerminalServers(connectionId)
-
-  const current = servers.find((s) => s?.desktop_work)
-  if (current && current.url === url && current.key === apiKey) return 'ok'
-
-  await saveTerminalServers(connectionId, [
-    ...servers.filter((s) => !s?.desktop_work),
-    {
-      url,
-      key: apiKey,
-      name: SERVER_NAME,
-      auth_type: 'bearer',
-      path: '/openapi.json',
-      enabled: current ? current.enabled !== false : true,
-      desktop_work: true
-    }
-  ])
-  return 'changed'
-}
-
-// Whether Open WebUI currently offers our tools — this is the Chat / Work
-// switch (also Open WebUI → Settings → Integrations → Open Terminal).
-export const getWorkServerEnabled = async (connectionId: string): Promise<boolean | null> => {
-  const servers = await readTerminalServers(connectionId)
-  const current = servers.find((s) => s?.desktop_work)
-  return current ? current.enabled !== false : null
-}
-
-// Switch between Chat and Work: turn our terminal server on/off in Open
-// WebUI.  Enabling mirrors Open WebUI's own toggle (other direct terminals
-// are switched off) and also selects it in the chat input's terminal menu,
-// so the file panel works right away.
-export const setWorkServerEnabled = async (connectionId: string, enabled: boolean) => {
-  await ensureRegistered(connectionId)
+// Earlier builds stored the entry in the user's Open WebUI settings, where
+// every browser saw it (with the key).  Remove it and rotate the key.
+const cleanupLegacyEntry = async (connectionId: string) => {
   const ui = await readUiSettings(connectionId)
-  await saveTerminalServers(
+  const servers: any[] = ui.terminalServers ?? []
+  const legacy = servers.filter((s) => s?.desktop_work)
+  if (!legacy.length) return false
+
+  await saveUiSettings(connectionId, { terminalServers: servers.filter((s) => !s?.desktop_work) })
+  const { serverEnabled } = await workConfig()
+  apiKey = crypto.randomBytes(24).toString('base64url')
+  await saveWorkConfig({
+    apiKey,
+    // Keep the user's Chat / Work choice
+    serverEnabled: { ...serverEnabled, [connectionId]: legacy.some((s) => s.enabled !== false) }
+  })
+  return true
+}
+
+const scheduleCleanup = (connectionId: string, delay = CLEANUP_RETRY_MS) => {
+  if (!server) return
+  clearTimeout(cleanupTimers.get(connectionId))
+  cleanupTimers.set(
     connectionId,
-    (ui.terminalServers ?? []).map((s) =>
-      s?.desktop_work ? { ...s, enabled } : enabled ? { ...s, enabled: false } : s
-    ),
-    await changelogSeenPatch(connectionId, ui)
+    setTimeout(async () => {
+      cleanupTimers.delete(connectionId)
+      // Webviews fire several load events in a row — one run at a time
+      if (cleaning.has(connectionId) || cleaned.has(connectionId)) return
+      cleaning.add(connectionId)
+      try {
+        const removed = await cleanupLegacyEntry(connectionId)
+        cleaned.add(connectionId)
+        if (removed) {
+          log.info(`[work] removed the server-stored Local Files entry for ${connectionId}`)
+          // The open page still holds the old key
+          emit('work:reload', { connectionId })
+        }
+      } catch (err) {
+        // Usually "not signed in yet" — retry until the user logs in
+        log.debug(`[work] cleanup ${connectionId} pending: ${err?.message ?? err}`)
+        cleaning.delete(connectionId)
+        scheduleCleanup(connectionId)
+        return
+      }
+      cleaning.delete(connectionId)
+    }, delay)
   )
+}
+
+// Chat / Work for a connection (the Local Files terminal on or off)
+export const getWorkServerEnabled = async (connectionId: string): Promise<boolean> =>
+  (await workConfig()).serverEnabled[connectionId] ?? false
+
+const saveServerEnabled = async (connectionId: string, enabled: boolean) => {
+  const { serverEnabled } = await workConfig()
+  await saveWorkConfig({ serverEnabled: { ...serverEnabled, [connectionId]: enabled } })
+}
+
+// The terminal server entry the preload adds to this page's settings
+export const getWorkPageEntry = async (connectionId: string) => {
+  if (!server || !port || !apiKey) return null
+  return {
+    url: baseUrlFor(connectionId),
+    key: apiKey,
+    name: SERVER_NAME,
+    enabled: await getWorkServerEnabled(connectionId)
+  }
+}
+
+// The user toggled Local Files in Open WebUI's own UI (Integrations or the
+// chat input's terminal menu) — follow it, the page already applied it.
+export const reportWorkServerEnabled = (connectionId: string, enabled: boolean) =>
+  saveServerEnabled(connectionId, enabled)
+
+// Switch between Chat and Work.  Enabling also selects Local Files in the
+// chat input's terminal menu so the file panel works right away; the page
+// reloads so Open WebUI picks up the change.
+export const setWorkServerEnabled = async (connectionId: string, enabled: boolean) => {
+  await saveServerEnabled(connectionId, enabled)
+  await markChangelogSeen(connectionId)
 
   // Open WebUI restores the selected terminal from localStorage on load
   const url = JSON.stringify(baseUrlFor(connectionId))
@@ -357,41 +392,7 @@ export const setWorkServerEnabled = async (connectionId: string, enabled: boolea
     }
   }
 
-  // Open WebUI reads terminal servers on load
   emit('work:reload', { connectionId })
-}
-
-const scheduleRegister = (connectionId: string, delay = REGISTER_RETRY_MS) => {
-  if (!server) return
-  clearTimeout(registerTimers.get(connectionId))
-  registerTimers.set(
-    connectionId,
-    setTimeout(async () => {
-      registerTimers.delete(connectionId)
-      // Webviews fire several load events in a row — one registration at a time
-      if (registering.has(connectionId) || registered.has(connectionId)) return
-      registering.add(connectionId)
-      try {
-        const result = await ensureRegistered(connectionId)
-        registered.add(connectionId)
-        log.info(`[work] registered with ${connectionId} (${result})`)
-        // Open WebUI loads terminal servers on startup; reload once so the
-        // freshly-saved server is picked up.
-        if (result === 'changed' && !reloaded.has(connectionId)) {
-          reloaded.add(connectionId)
-          emit('work:reload', { connectionId })
-        }
-        emit('work:status', getWorkInfo())
-      } catch (err) {
-        // Usually "not signed in yet" — retry until the user logs in
-        log.debug(`[work] register ${connectionId} pending: ${err?.message ?? err}`)
-        registering.delete(connectionId)
-        scheduleRegister(connectionId)
-        return
-      }
-      registering.delete(connectionId)
-    }, delay)
-  )
 }
 
 // ─── Projects ───────────────────────────────────────────
@@ -405,8 +406,7 @@ export const getWorkProjects = async (connectionId: string) => {
   } catch (err) {
     error = err?.message ?? String(err)
   }
-  let serverEnabled: boolean | null = null
-  if (!error) serverEnabled = await getWorkServerEnabled(connectionId).catch(() => null)
+  const serverEnabled = await getWorkServerEnabled(connectionId)
   return {
     error,
     serverEnabled,
@@ -522,9 +522,15 @@ export const getWorkContext = async (connectionId: string, pageUrl: string) => {
 
 // ─── In-page Chat / Work switch ─────────────────────────
 
-// Which connection a webview belongs to (by its partition session)
-export const workConnectionForContents = (contents: Electron.WebContents): string | null => {
-  for (const id of attached.keys()) {
+// Which connection a webview belongs to (by its partition session).  The
+// preload asks before the renderer has attached the page, so fall back to
+// the configured connections.
+export const workConnectionForContents = async (
+  contents: Electron.WebContents
+): Promise<string | null> => {
+  const config = await getConfig()
+  const ids = new Set([...attached.keys(), 'local', ...(config.connections ?? []).map((c) => c.id)])
+  for (const id of ids) {
     if (connectionSession(id) === contents.session) return id
   }
   return null
@@ -538,7 +544,7 @@ export const getWorkProjectPath = async (connectionId: string, folderId: string)
 // Everything the in-page switch renders for the current page: the mode,
 // the project context and — outside a project — the list to pick from.
 export const getWorkPageState = async (connectionId: string, pageUrl: string) => {
-  const enabled = await getWorkServerEnabled(connectionId).catch(() => null)
+  const enabled = await getWorkServerEnabled(connectionId)
   const context = enabled ? await getWorkContext(connectionId, pageUrl).catch(() => null) : null
   let projects: any[] = []
   if (enabled && !context) {

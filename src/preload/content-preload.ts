@@ -1,5 +1,8 @@
 import { ipcRenderer, contextBridge } from 'electron'
-import { initWorkOverlay } from './work-overlay'
+import { initWorkOverlay, installWorkSettingsBridge } from './work-overlay'
+
+// Must run before Open WebUI's own scripts load the user's settings
+installWorkSettingsBridge()
 
 // ─── Desktop ↔ Open WebUI Generic Protocol ──────────────
 // This preload is a dumb relay. It passes typed {type, data}

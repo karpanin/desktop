@@ -1,4 +1,138 @@
-import { ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
+
+// ─── Local Files entry: desktop-only ────────────────────
+// The Local Files terminal server is never stored in Open WebUI.  This runs
+// in the page's own world before Open WebUI starts and wraps fetch():
+//   • GET  /api/v1/users/user/settings        → add our entry to
+//     ui.terminalServers (and drop any stale copy)
+//   • POST /api/v1/users/user/settings/update → strip our entry before it
+//     reaches the server, report its enabled flag (the user toggled it in
+//     Open WebUI's own UI) and add it back to the response
+// A regular browser therefore never sees the entry or its key.
+function installSettingsPatch() {
+  const w = window as any
+  if (w.__owuiDesktopWork) return
+
+  let entry: { url: string; key: string; name: string; enabled: boolean } | null = null
+  let settled = false
+  let markReady: () => void = () => {}
+  const ready = new Promise<void>((resolve) => (markReady = resolve))
+  const setEntry = (value: typeof entry) => {
+    if (settled) return
+    settled = true
+    entry = value
+    markReady()
+  }
+  // Never hold Open WebUI's settings request for long
+  setTimeout(() => setEntry(null), 3000)
+
+  const isOurs = (s: any) => !!s?.desktop_work
+  const inject = (ui: any) => {
+    const base = ui && typeof ui === 'object' ? ui : {}
+    const servers = (Array.isArray(base.terminalServers) ? base.terminalServers : []).filter(
+      (s: any) => !isOurs(s)
+    )
+    if (entry) {
+      servers.push({
+        url: entry.url,
+        key: entry.key,
+        name: entry.name,
+        auth_type: 'bearer',
+        path: '/openapi.json',
+        enabled: entry.enabled,
+        desktop_work: true
+      })
+    }
+    return { ...base, terminalServers: servers }
+  }
+  const kindOf = (url: string) => {
+    try {
+      const u = new URL(url, location.href)
+      if (u.origin !== location.origin) return null
+      if (u.pathname.endsWith('/api/v1/users/user/settings')) return 'get'
+      if (u.pathname.endsWith('/api/v1/users/user/settings/update')) return 'update'
+    } catch {
+      // not a URL
+    }
+    return null
+  }
+
+  const originalFetch = window.fetch.bind(window)
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url
+    const kind = kindOf(url)
+    const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+    if (!kind || (kind === 'get' && method !== 'GET') || (kind === 'update' && method !== 'POST')) {
+      return originalFetch(input, init)
+    }
+    await ready
+
+    if (kind === 'update' && typeof init?.body === 'string') {
+      try {
+        const body = JSON.parse(init.body)
+        const servers = body?.ui?.terminalServers
+        if (Array.isArray(servers)) {
+          const mine = servers.find(isOurs)
+          if (mine && entry && !!mine.enabled !== entry.enabled) {
+            entry.enabled = !!mine.enabled
+            window.postMessage(
+              { __owuiDesktopWork: 'enabled', enabled: entry.enabled },
+              location.origin
+            )
+          }
+          body.ui.terminalServers = servers.filter((s: any) => !isOurs(s))
+          init = { ...init, body: JSON.stringify(body) }
+        }
+      } catch {
+        // Not JSON — pass through untouched
+      }
+    }
+
+    const res = await originalFetch(input, init)
+    if (!res.ok) return res
+    try {
+      const json = (await res.clone().json()) ?? {}
+      json.ui = inject(json.ui)
+      return new Response(JSON.stringify(json), {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers
+      })
+    } catch {
+      return res
+    }
+  }
+
+  Object.defineProperty(w, '__owuiDesktopWork', { value: Object.freeze({ setEntry }) })
+}
+
+// Call as early as possible — before Open WebUI loads the user's settings
+export const installWorkSettingsBridge = () => {
+  try {
+    contextBridge.executeInMainWorld({ func: installSettingsPatch })
+  } catch (err) {
+    console.error('[work] could not install the settings bridge:', err)
+    return
+  }
+
+  ipcRenderer
+    .invoke('work:page:entry')
+    .catch(() => null)
+    .then((entry) => {
+      contextBridge.executeInMainWorld({
+        func: (value: unknown) => (window as any).__owuiDesktopWork?.setEntry(value),
+        args: [entry]
+      })
+    })
+
+  // The user toggled Local Files in Open WebUI's own UI
+  window.addEventListener('message', (e) => {
+    if (e.source === window && e.data?.__owuiDesktopWork === 'enabled') {
+      ipcRenderer.invoke('work:page:reportEnabled', e.data.enabled === true).catch(() => {})
+    }
+  })
+}
 
 // ─── In-page Chat / Work switch ─────────────────────────
 // Rendered by the desktop on top of the Open WebUI page, centred over the

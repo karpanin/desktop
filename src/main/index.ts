@@ -95,6 +95,8 @@ import {
   setWorkServerEnabled,
   workConnectionForContents,
   getWorkPageState,
+  getWorkPageEntry,
+  reportWorkServerEnabled,
   getWorkProjectPath
 } from './utils/work'
 
@@ -1671,27 +1673,38 @@ if (!gotTheLock) {
     // In-page Chat / Work switch (src/preload/work-overlay.ts).  The
     // connection comes from the sender's session, never from arguments,
     // and paths are only ever looked up from the linked projects.
-    const pageConnection = (event: Electron.IpcMainInvokeEvent): string => {
+    const pageConnection = async (event: Electron.IpcMainInvokeEvent): Promise<string> => {
       const connectionId =
-        event.sender.getType() === 'webview' ? workConnectionForContents(event.sender) : null
+        event.sender.getType() === 'webview' ? await workConnectionForContents(event.sender) : null
       if (!connectionId) throw new Error('Not an Open WebUI connection page')
       return connectionId
     }
-    ipcMain.handle('work:page:state', (event, pageUrl: string) =>
-      getWorkPageState(pageConnection(event), String(pageUrl))
-    )
-    ipcMain.handle('work:page:setEnabled', (event, enabled: boolean) =>
-      setWorkServerEnabled(pageConnection(event), enabled === true)
-    )
-    ipcMain.handle('work:page:setMode', (event, folderId: string, mode: string) => {
-      if (!['read', 'confirm', 'auto'].includes(mode)) throw new Error('Invalid mode')
-      return updateWorkProject(pageConnection(event), String(folderId), { mode })
+    // Asked by the preload as the page starts: the Local Files entry to add
+    // to this page's Open WebUI settings (it is never stored on the server)
+    ipcMain.handle('work:page:entry', async (event) => {
+      const connectionId = await pageConnection(event).catch(() => null)
+      if (!connectionId) return null
+      attachWorkConnection(connectionId, event.sender.getURL())
+      return getWorkPageEntry(connectionId)
     })
-    ipcMain.handle('work:page:link', (event, folderId: string, folderName: string) =>
-      linkWorkFolderWithDialog(pageConnection(event), String(folderId), String(folderName))
+    ipcMain.handle('work:page:reportEnabled', async (event, enabled: boolean) =>
+      reportWorkServerEnabled(await pageConnection(event), enabled === true)
+    )
+    ipcMain.handle('work:page:state', async (event, pageUrl: string) =>
+      getWorkPageState(await pageConnection(event), String(pageUrl))
+    )
+    ipcMain.handle('work:page:setEnabled', async (event, enabled: boolean) =>
+      setWorkServerEnabled(await pageConnection(event), enabled === true)
+    )
+    ipcMain.handle('work:page:setMode', async (event, folderId: string, mode: string) => {
+      if (!['read', 'confirm', 'auto'].includes(mode)) throw new Error('Invalid mode')
+      return updateWorkProject(await pageConnection(event), String(folderId), { mode })
+    })
+    ipcMain.handle('work:page:link', async (event, folderId: string, folderName: string) =>
+      linkWorkFolderWithDialog(await pageConnection(event), String(folderId), String(folderName))
     )
     ipcMain.handle('work:page:openFolder', async (event, folderId: string) => {
-      const dir = await getWorkProjectPath(pageConnection(event), String(folderId))
+      const dir = await getWorkProjectPath(await pageConnection(event), String(folderId))
       if (dir) await shell.openPath(dir)
     })
 

@@ -10,7 +10,7 @@
   let info = $state<{
     status: string | null
     port: number | null
-    connections: { id: string; url: string; registered: boolean }[]
+    connections: { id: string; url: string }[]
   } | null>(null)
   let connectionId = $state<string | null>(null)
   let folders = $state<Folder[]>([])
