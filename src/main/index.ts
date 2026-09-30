@@ -82,6 +82,7 @@ import {
   getRepoFiles
 } from './utils/huggingface'
 
+import { ensureWorkPython } from './utils/work-python'
 import {
   initWork,
   startWorkServer,
@@ -1703,6 +1704,10 @@ if (!gotTheLock) {
     ipcMain.handle('work:page:link', async (event, folderId: string, folderName: string) =>
       linkWorkFolderWithDialog(await pageConnection(event), String(folderId), String(folderName))
     )
+    ipcMain.handle('work:page:setupPython', async (event) => {
+      await pageConnection(event)
+      ensureWorkPython().catch(() => {})
+    })
     ipcMain.handle('work:page:openFolder', async (event, folderId: string) => {
       const dir = await getWorkProjectPath(await pageConnection(event), String(folderId))
       if (dir) await shell.openPath(dir)

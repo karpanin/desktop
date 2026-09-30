@@ -365,7 +365,7 @@ export const getPythonPath = (installationDir?: string) => {
  * Any additional env overrides (e.g. `configEnvVars`) can be spread after
  * calling this helper.
  */
-const pythonEnv = (extra: Record<string, string> = {}): Record<string, string> => {
+export const pythonEnv = (extra: Record<string, string> = {}): Record<string, string> => {
   const base: Record<string, string> = { ...process.env }
 
   if (process.platform === 'win32') {

@@ -150,6 +150,7 @@ type PageState = {
   enabled: boolean | null
   context: { folderId: string; folderName: string; project: Project | null } | null
   projects: { id: string; name: string; parentId: string | null; path: string | null }[]
+  python?: { state: 'missing' | 'installing' | 'ready' | 'failed'; message?: string }
 }
 
 const STRINGS = {
@@ -169,7 +170,10 @@ const STRINGS = {
     changeFolder: 'Change folder…',
     projectNotLinked: 'Project "{name}" is not linked to a folder on this computer.',
     linkLocalFolder: 'Link a local folder…',
-    from: 'from "{name}"'
+    from: 'from "{name}"',
+    preparing: 'Preparing tools…',
+    preparingHint: 'Setting up Python for documents (once, a few minutes): {message}',
+    setupFailed: 'Tools setup failed — retry'
   },
   ru: {
     chat: 'Чат',
@@ -187,7 +191,10 @@ const STRINGS = {
     changeFolder: 'Сменить папку…',
     projectNotLinked: 'Проект «{name}» не привязан к папке на этом компьютере.',
     linkLocalFolder: 'Привязать локальную папку…',
-    from: 'из «{name}»'
+    from: 'из «{name}»',
+    preparing: 'Подготовка инструментов…',
+    preparingHint: 'Устанавливается Python для документов (один раз, несколько минут): {message}',
+    setupFailed: 'Не удалось подготовить инструменты — повторить'
   }
 }
 
@@ -220,6 +227,10 @@ svg { flex-shrink: 0; }
 .note { font-size: 12px; color: var(--muted); padding: 6px 10px 8px; line-height: 1.4; }
 .sep { height: 1px; background: var(--border); margin: 5px 4px; }
 .busy { opacity: .6; pointer-events: none; }
+.status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); padding: 6px 4px; }
+.status button { border: 0; background: var(--seg); color: var(--fg); padding: 6px 10px; border-radius: 999px; font-size: 12px; cursor: pointer; }
+.spin { width: 11px; height: 11px; border: 1.5px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin .9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 `
 
 const THEMES = {
@@ -385,6 +396,24 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
     )
   }
 
+  // One-time setup of the Python tools (scripts, PDF reading)
+  const pythonStatusHtml = () => {
+    const python = state?.python
+    if (python?.state === 'installing') {
+      return (
+        `<div class="status" title="${escape(t('preparingHint', { message: python.message ?? '' }))}">` +
+        `<span class="spin"></span>${escape(t('preparing'))}</div>`
+      )
+    }
+    if (python?.state === 'failed') {
+      return (
+        `<div class="status" title="${escape(python.message ?? '')}">` +
+        `<button data-action="setup-python">${escape(t('setupFailed'))}</button></div>`
+      )
+    }
+    return ''
+  }
+
   const render = () => {
     const visible = state?.enabled !== null && state !== null && isChatRoute(location.pathname)
     if (!visible) {
@@ -405,7 +434,8 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
       (work
         ? `<div class="chip"><button data-action="menu">${chipLabel()}</button>` +
           (menuOpen ? `<div class="menu">${menuHtml()}</div>` : '') +
-          `</div>`
+          `</div>` +
+          pythonStatusHtml()
         : '') +
       `</div>`
   }
@@ -469,8 +499,21 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
         ipcRenderer.invoke('work:page:openFolder', ctx.project.folderId).catch(() => {})
         render()
         return
+      case 'setup-python':
+        ipcRenderer.invoke('work:page:setupPython').catch(() => {})
+        if (state) state.python = { state: 'installing' }
+        render()
+        return
     }
   }
+
+  // Pushed by the main process (Python setup progress, …)
+  ipcRenderer.on('work:event', (_event, message: { type: string; data: any }) => {
+    if (message?.type === 'work:python' && state) {
+      state.python = message.data
+      render()
+    }
+  })
 
   const start = () => {
     // Close the menu on outside clicks and Escape

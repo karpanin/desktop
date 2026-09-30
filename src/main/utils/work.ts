@@ -9,6 +9,12 @@ import { app, dialog, session, shell, webContents, BrowserWindow } from 'electro
 import log from 'electron-log'
 import { getConfig, setConfig } from './index'
 import { extractDocumentText, isExtractableDocument } from './work-documents'
+import {
+  ensureWorkPython,
+  getWorkPythonStatus,
+  onWorkPythonStatus,
+  runWorkScript
+} from './work-python'
 
 // ─── Work Mode: Local Files Server ──────────────────────
 // A small HTTP server that gives Open WebUI's agent loop access to a
@@ -100,6 +106,22 @@ export const initWork = (options: {
 }) => {
   getWindow = options.getWindow
   emit = options.emit
+  // Python setup progress shows in the in-page Work switch
+  onWorkPythonStatus((python) => pushToPages('work:python', python))
+}
+
+// Push an event to the Work overlay of every open connection page
+// (webview preload, see work-overlay.ts)
+const pushToPages = (type: string, data?: any) => {
+  const sessions = [...attached.keys()].map(connectionSession)
+  for (const contents of webContents.getAllWebContents()) {
+    try {
+      if (contents.isDestroyed() || contents.getType() !== 'webview') continue
+      if (sessions.includes(contents.session)) contents.send('work:event', { type, data })
+    } catch {
+      // Page going away
+    }
+  }
 }
 
 const workConfig = async (): Promise<WorkConfig> => {
@@ -556,7 +578,9 @@ export const getWorkPageState = async (connectionId: string, pageUrl: string) =>
       path: linked[projectKey(connectionId, f.id)]?.path ?? null
     }))
   }
-  return { enabled, context, projects }
+  // Work mode needs the scripting environment — set it up in the background
+  if (enabled && getWorkPythonStatus().state === 'missing') ensureWorkPython().catch(() => {})
+  return { enabled, context, projects, python: getWorkPythonStatus() }
 }
 
 // ─── Path Sandboxing ────────────────────────────────────
@@ -883,6 +907,18 @@ async function* walk(
   }
 }
 
+// Files in the project modified since `since` (after a script ran)
+const changedSince = async (root: string, since: number): Promise<string[]> => {
+  const changed: string[] = []
+  for await (const { full, rel, dirent } of walk(root, true)) {
+    if (!dirent.isFile()) continue
+    const s = await fs.promises.stat(full).catch(() => null)
+    if (s && s.mtimeMs >= since - 1000) changed.push(rel)
+    if (changed.length >= 50) break
+  }
+  return changed
+}
+
 const globToRegExp = (pattern: string): RegExp => {
   let re = ''
   for (let i = 0; i < pattern.length; i++) {
@@ -899,8 +935,38 @@ const globToRegExp = (pattern: string): RegExp => {
   return new RegExp(`^${re}$`, 'i')
 }
 
-const readTextForModel = async (target: string) => {
+const pythonNotReadyError = (what: string) => {
+  const python = getWorkPythonStatus()
+  if (python.state !== 'installing') ensureWorkPython().catch(() => {})
+  return new HttpError(
+    503,
+    `${what} needs the Work Python tools, which are being set up (${python.message ?? 'starting'}). ` +
+      'This happens once and takes a few minutes. Tell the user and continue with other steps; ' +
+      'do not retry right away.',
+    'preparing'
+  )
+}
+
+const readPdfText = async (target: string, root: string) => {
+  if (getWorkPythonStatus().state !== 'ready') throw pythonNotReadyError('Reading PDF files')
+  const result = await runWorkScript({
+    code: 'import sys\nfrom owui_work.pdf import extract_text\nsys.stdout.write(extract_text(sys.argv[1]))\n',
+    root,
+    write: false,
+    readRoots: skillRoots(),
+    args: [target],
+    timeoutMs: 120_000,
+    outputLimit: MAX_TEXT_READ_BYTES
+  })
+  if (result.exit_code !== 0) {
+    throw new HttpError(422, `Could not read the PDF: ${result.stderr.trim().split('\n').pop()}`)
+  }
+  return result.stdout.trim() || '(This PDF has no text layer — it is probably a scan.)'
+}
+
+const readTextForModel = async (target: string, root?: string) => {
   const ext = path.extname(target).toLowerCase()
+  if (ext === '.pdf') return readPdfText(target, root ?? path.dirname(target))
   const buf = await fs.promises.readFile(target)
   if (isExtractableDocument(ext)) return extractDocumentText(buf, ext)
   if (isBinary(buf)) return null
@@ -1130,6 +1196,28 @@ const openApiSpec = () => ({
         )
       }
     },
+    '/tools/run_script': {
+      post: {
+        operationId: 'run_script',
+        summary: 'Run a Python script',
+        description:
+          'Run Python 3.12 code with the project folder as the working directory. Use it to create or ' +
+          'edit Word, Excel, PowerPoint and PDF files and to analyse data — read the matching skill ' +
+          '(get_workspace lists them) first. Available: openpyxl, python-docx (import docx), ' +
+          'python-pptx (import pptx), pypdf, pdfplumber, pandas, matplotlib, and the owui_work helpers ' +
+          'the skills describe. The script can only change files inside the project folder; no ' +
+          'network, no other programs. print() what you need to see. Returns exit_code, stdout, ' +
+          'stderr and the files it changed.',
+        requestBody: jsonBody(
+          {
+            code: str('Complete Python script.'),
+            description: str('One short sentence for the user: what the script does.'),
+            timeout_seconds: int('Time limit, default 120, max 600.')
+          },
+          ['code', 'description']
+        )
+      }
+    },
     '/tools/delete_path': {
       post: {
         operationId: 'delete_path',
@@ -1152,12 +1240,14 @@ const MODEL_TOOL_ROUTES = new Set(Object.keys(openApiSpec().paths))
 const SYSTEM_PROMPT =
   "You can work with files in a local folder on the user's computer through the Local Files tools " +
   '(get_workspace, list_files, read_file, grep_search, glob_search, write_file, replace_file_content, ' +
-  'create_directory, move_path, copy_path, delete_path, display_file). They only work when the chat ' +
+  'create_directory, move_path, copy_path, delete_path, run_script, display_file). They only work when the chat ' +
   'belongs to an Open WebUI project that the user linked to a local folder in Open WebUI Desktop. ' +
   'When the user asks about their files or documents, call get_workspace first. Use paths relative to ' +
   'the project folder. The tools enforce all access limits themselves: when the user asks for a file, ' +
   'just call the tool and report its answer briefly — never deliberate about whether a path is allowed. ' +
-  'If one of the listed skills fits the task, read its SKILL.md with read_file and follow it. Explore ' +
+  'To create or edit Word, Excel, PowerPoint or PDF files, read the matching skill (docx, xlsx, pptx, ' +
+  'pdf) with read_file and follow it, using run_script. If another listed skill fits the task, read ' +
+  'its SKILL.md too. Explore ' +
   'before changing anything, make focused edits, and after creating or changing a document call ' +
   "display_file so the user can review it. Some changes need the user's approval; when a tool " +
   'returns an error, do not retry the same action — explain it to the user.'
@@ -1372,7 +1462,7 @@ const routeRequest = async (
       return
     }
 
-    const text = await readTextForModel(target)
+    const text = await readTextForModel(target, ws?.root)
     if (text === null) {
       throw new HttpError(415, `Unsupported binary file type: ${mime} (${stat.size} bytes)`)
     }
@@ -1439,6 +1529,7 @@ const routeRequest = async (
       try {
         const s = await fs.promises.stat(full)
         if (s.size > MAX_SEARCH_FILE_BYTES && !isExtractableDocument(ext)) continue
+        if (ext === '.pdf') continue // too slow to extract while searching
         text = await readTextForModel(full)
       } catch {
         continue
@@ -1564,6 +1655,36 @@ const routeRequest = async (
     if (copy) await fs.promises.cp(source, destination, { recursive: true })
     else await fs.promises.rename(source, destination)
     return sendJson(res, 200, { source, destination })
+  }
+
+  if (route === '/tools/run_script' && method === 'POST') {
+    const w = requireWs()
+    const body = await readJson(req)
+    const code = String(body.code ?? '')
+    if (!code.trim()) throw new HttpError(400, 'code is required')
+    if (getWorkPythonStatus().state !== 'ready') throw pythonNotReadyError('Running scripts')
+
+    // Read-only projects run scripts without write access (analysis only)
+    const write = w.project.mode !== 'read'
+    if (write) {
+      const what = String(body.description ?? '').trim()
+      await guardWrite(w, `Run a Python script${what ? `: ${what}` : ''}`, preview(code, 40))
+    }
+    const seconds = Math.min(600, Math.max(5, Number(body.timeout_seconds) || 120))
+    const result = await runWorkScript({
+      code,
+      root: w.root,
+      write,
+      readRoots: skillRoots(),
+      timeoutMs: seconds * 1000
+    })
+    return sendJson(res, 200, {
+      exit_code: result.exit_code,
+      timed_out: result.timed_out,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      changed_files: await changedSince(w.root, result.started)
+    })
   }
 
   if (route === '/tools/delete_path' && method === 'POST') {
