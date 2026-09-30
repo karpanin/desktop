@@ -69,6 +69,7 @@ let emit: (type: string, data?: any) => void = () => {}
 // connectionId → Open WebUI origin (e.g. https://chat.example.com)
 const attached = new Map<string, { url: string; origin: string }>()
 const registered = new Set<string>()
+const registering = new Set<string>()
 const reloaded = new Set<string>()
 const registerTimers = new Map<string, NodeJS.Timeout>()
 
@@ -168,6 +169,7 @@ export const stopWorkServer = async (): Promise<void> => {
   for (const t of registerTimers.values()) clearTimeout(t)
   registerTimers.clear()
   registered.clear()
+  registering.clear()
   if (!server) return
   await new Promise<void>((resolve) => server!.close(() => resolve()))
   server = null
@@ -325,6 +327,9 @@ const scheduleRegister = (connectionId: string, delay = REGISTER_RETRY_MS) => {
     connectionId,
     setTimeout(async () => {
       registerTimers.delete(connectionId)
+      // Webviews fire several load events in a row — one registration at a time
+      if (registering.has(connectionId) || registered.has(connectionId)) return
+      registering.add(connectionId)
       try {
         const result = await ensureRegistered(connectionId)
         registered.add(connectionId)
@@ -339,8 +344,11 @@ const scheduleRegister = (connectionId: string, delay = REGISTER_RETRY_MS) => {
       } catch (err) {
         // Usually "not signed in yet" — retry until the user logs in
         log.debug(`[work] register ${connectionId} pending: ${err?.message ?? err}`)
+        registering.delete(connectionId)
         scheduleRegister(connectionId)
+        return
       }
+      registering.delete(connectionId)
     }, delay)
   )
 }

@@ -1219,7 +1219,11 @@ if (!gotTheLock) {
   app.whenReady().then(async () => {
     CONFIG = await getConfig()
     loadSpotlightPosition()
-    log.info('Config:', CONFIG)
+    // API keys of local services must not end up in shared log files
+    log.info(
+      'Config:',
+      JSON.parse(JSON.stringify(CONFIG, (key, value) => (key === 'apiKey' && value ? '***' : value)))
+    )
 
     app.name = 'Open WebUI'
     if (process.platform === 'darwin' && app.dock) {
