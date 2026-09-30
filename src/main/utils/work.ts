@@ -478,11 +478,23 @@ export const getWorkContext = async (connectionId: string, pageUrl: string) => {
 class HttpError extends Error {
   constructor(
     public status: number,
-    message: string
+    message: string,
+    public code = 'error'
   ) {
     super(message)
   }
 }
+
+// Model-facing denials are worded as final answers: reasoning models tend
+// to deliberate at length over vague errors, so say what happened, that
+// retrying won't help, and what to do instead.
+const outsideError = (p: string, root: string) =>
+  new HttpError(
+    403,
+    `Access denied: "${p}" is outside the project folder ${root}. Only files inside that folder ` +
+      'are accessible. This is final — do not retry with another path; tell the user in one sentence.',
+    'access_denied'
+  )
 
 const samePathCase = process.platform === 'win32' || process.platform === 'darwin'
 
@@ -536,7 +548,7 @@ const resolveIn = async (root: string, p: string | undefined | null): Promise<st
 
 const resolvePath = async (ws: Workspace, p: string | undefined | null): Promise<string> => {
   const target = await resolveIn(ws.root, p)
-  if (!target) throw new HttpError(403, `Path is outside the project folder: ${p}`)
+  if (!target) throw outsideError(String(p), ws.root)
   return target
 }
 
@@ -553,15 +565,16 @@ const resolveReadable = async (ws: Workspace | null, p: string): Promise<string>
     }
   }
   if (!ws) throw notLinkedError()
-  throw new HttpError(403, `Path is outside the project folder: ${p}`)
+  throw outsideError(p, ws.root)
 }
 
 const notLinkedError = () =>
   new HttpError(
     409,
-    'This chat is not in an Open WebUI project linked to a local folder. ' +
-      'Ask the user to move the chat into a project and link that project to a folder ' +
-      'in Open WebUI Desktop (Settings → Work).'
+    'This chat is not in an Open WebUI project linked to a local folder, so no local files are ' +
+      'accessible. Do not retry. Tell the user to move the chat into a project and link that project ' +
+      'to a folder in the Work bar of Open WebUI Desktop.',
+    'not_linked'
   )
 
 // ─── Approvals ──────────────────────────────────────────
@@ -835,7 +848,7 @@ const openApiSpec = () => ({
     version: app.getVersion(),
     description:
       'Access to the local folder linked to the current Open WebUI project. ' +
-      'Paths are relative to the project folder.'
+      'Paths are relative to the project folder; anything outside it is rejected by the tools.'
   },
   paths: {
     '/workspace': {
@@ -855,7 +868,7 @@ const openApiSpec = () => ({
         summary: 'List directory contents',
         description: 'List files and sub-folders of a folder inside the project.',
         parameters: [
-          query('directory', str('Folder path, relative to the project root. Default "."'))
+          query('directory', str('Folder path, relative to the project folder. Default "."'))
         ]
       }
     },
@@ -868,7 +881,11 @@ const openApiSpec = () => ({
           'files are converted to text (tables as | cells |, sheets as CSV). ' +
           'Optionally request a line range for large files.',
         parameters: [
-          query('path', str('File path, relative to the project root.'), true),
+          query(
+            'path',
+            str('File path, relative to the project folder (absolute paths inside it work too).'),
+            true
+          ),
           query('start_line', int('First line to return (1-indexed).')),
           query('end_line', int('Last line to return (1-indexed, inclusive).'))
         ]
@@ -881,7 +898,13 @@ const openApiSpec = () => ({
         description:
           "Open a file in the user's file preview panel. Use after creating or changing a " +
           'document the user should look at. Does not return the content.',
-        parameters: [query('path', str('File path, relative to the project root.'), true)]
+        parameters: [
+          query(
+            'path',
+            str('File path, relative to the project folder (absolute paths inside it work too).'),
+            true
+          )
+        ]
       }
     },
     '/files/grep': {
@@ -894,7 +917,7 @@ const openApiSpec = () => ({
         requestBody: jsonBody(
           {
             query: str('Text or regular expression to find.'),
-            path: str('Folder or file to search in, relative to the project root. Default "."'),
+            path: str('Folder or file to search in, relative to the project folder. Default "."'),
             regex: boolean('Treat query as a regular expression. Default false.'),
             case_insensitive: boolean('Ignore case. Default true.'),
             include: str('Only search files matching this glob, e.g. "*.md".'),
@@ -916,7 +939,7 @@ const openApiSpec = () => ({
             str('Glob pattern. Without "/" it matches file names at any depth.'),
             true
           ),
-          query('path', str('Folder to search in, relative to the project root. Default "."')),
+          query('path', str('Folder to search in, relative to the project folder. Default "."')),
           query('type', str('Filter: file, directory or any. Default any.')),
           query('max_results', int('Maximum results. Default 100.'))
         ]
@@ -931,7 +954,9 @@ const openApiSpec = () => ({
           'created automatically. Depending on the project mode the user may need to approve.',
         requestBody: jsonBody(
           {
-            path: str('File path, relative to the project root.'),
+            path: str(
+              'File path, relative to the project folder (absolute paths inside it work too).'
+            ),
             content: str('Full text content of the file.')
           },
           ['path', 'content']
@@ -947,7 +972,9 @@ const openApiSpec = () => ({
           'unless allow_multiple is true. Prefer this over rewriting the whole file.',
         requestBody: jsonBody(
           {
-            path: str('File path, relative to the project root.'),
+            path: str(
+              'File path, relative to the project folder (absolute paths inside it work too).'
+            ),
             replacements: {
               type: 'array',
               description: 'Replacements applied in order.',
@@ -971,7 +998,14 @@ const openApiSpec = () => ({
         operationId: 'create_directory',
         summary: 'Create a folder',
         description: 'Create a folder (and missing parents) inside the project.',
-        requestBody: jsonBody({ path: str('Folder path, relative to the project root.') }, ['path'])
+        requestBody: jsonBody(
+          {
+            path: str(
+              'Folder path, relative to the project folder (absolute paths inside it work too).'
+            )
+          },
+          ['path']
+        )
       }
     },
     '/tools/move_path': {
@@ -981,8 +1015,12 @@ const openApiSpec = () => ({
         description: 'Move or rename a file or folder inside the project.',
         requestBody: jsonBody(
           {
-            source: str('Existing path, relative to the project root.'),
-            destination: str('New path, relative to the project root.')
+            source: str(
+              'Existing path, relative to the project folder (absolute paths inside it work too).'
+            ),
+            destination: str(
+              'New path, relative to the project folder (absolute paths inside it work too).'
+            )
           },
           ['source', 'destination']
         )
@@ -995,8 +1033,12 @@ const openApiSpec = () => ({
         description: 'Copy a file or folder inside the project.',
         requestBody: jsonBody(
           {
-            source: str('Existing path, relative to the project root.'),
-            destination: str('Destination path, relative to the project root.')
+            source: str(
+              'Existing path, relative to the project folder (absolute paths inside it work too).'
+            ),
+            destination: str(
+              'Destination path, relative to the project folder (absolute paths inside it work too).'
+            )
           },
           ['source', 'destination']
         )
@@ -1007,11 +1049,19 @@ const openApiSpec = () => ({
         operationId: 'delete_path',
         summary: 'Move to trash',
         description: 'Move a file or folder to the system trash (recoverable by the user).',
-        requestBody: jsonBody({ path: str('Path, relative to the project root.') }, ['path'])
+        requestBody: jsonBody(
+          {
+            path: str('Path, relative to the project folder (absolute paths inside it work too).')
+          },
+          ['path']
+        )
       }
     }
   }
 })
+
+// Routes exposed to the model as tools (see openApiSpec)
+const MODEL_TOOL_ROUTES = new Set(Object.keys(openApiSpec().paths))
 
 const SYSTEM_PROMPT =
   "You can work with files in a local folder on the user's computer through the Local Files tools " +
@@ -1019,10 +1069,12 @@ const SYSTEM_PROMPT =
   'create_directory, move_path, copy_path, delete_path, display_file). They only work when the chat ' +
   'belongs to an Open WebUI project that the user linked to a local folder in Open WebUI Desktop. ' +
   'When the user asks about their files or documents, call get_workspace first. Use paths relative to ' +
-  'the project folder. If one of the listed skills fits the task, read its SKILL.md with read_file and ' +
-  'follow it. Explore before changing anything, make focused edits, and after creating or ' +
-  'changing a document call display_file so the user can review it. Some changes may require the ' +
-  "user's approval; if an action is denied, do not retry it — ask the user instead."
+  'the project folder. The tools enforce all access limits themselves: when the user asks for a file, ' +
+  'just call the tool and report its answer briefly — never deliberate about whether a path is allowed. ' +
+  'If one of the listed skills fits the task, read its SKILL.md with read_file and follow it. Explore ' +
+  'before changing anything, make focused edits, and after creating or changing a document call ' +
+  "display_file so the user can review it. Some changes need the user's approval; when a tool " +
+  'returns an error, do not retry the same action — explain it to the user.'
 
 // ─── Request Router ─────────────────────────────────────
 
@@ -1073,12 +1125,25 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
   try {
     await routeRequest(req, res, url, route, connectionId!, chatId)
   } catch (err) {
-    if (err instanceof HttpError) return sendJson(res, err.status, { detail: err.message })
-    if (err?.code === 'ENOENT') return sendJson(res, 404, { detail: 'Not found' })
+    let failure: HttpError | null = err instanceof HttpError ? err : null
+    if (err?.code === 'ENOENT')
+      failure = new HttpError(404, 'File or folder not found.', 'not_found')
     if (err?.code === 'EACCES' || err?.code === 'EPERM') {
-      return sendJson(res, 403, { detail: 'Permission denied by the operating system' })
+      failure = new HttpError(403, 'The operating system denied access to this file.', 'os_denied')
     }
-    throw err
+    if (!failure) throw err
+
+    // For tool calls Open WebUI would hand the model "HTTP error! Status:
+    // 403. Message: {...escaped JSON...}" — answer with a clean result
+    // instead.  UI-only endpoints keep real status codes.
+    if (MODEL_TOOL_ROUTES.has(route)) {
+      return sendJson(res, 200, {
+        error: failure.code,
+        message: failure.message,
+        ...(route === '/files/display' ? { exists: false } : {})
+      })
+    }
+    return sendJson(res, failure.status, { detail: failure.message })
   }
 }
 
@@ -1122,11 +1187,19 @@ const routeRequest = async (
     if (w.project.mode === 'read') {
       throw new HttpError(
         403,
-        'The project is read-only. Ask the user to allow changes in Open WebUI Desktop.'
+        'The project is read-only (set by the user in Open WebUI Desktop), so files cannot be changed. ' +
+          'Do not retry; tell the user and suggest switching the project to "Ask before changes".',
+        'read_only'
       )
     }
     const ok = await requestApproval(connectionId, chatId, w, action, detail)
-    if (!ok) throw new HttpError(403, 'The user denied this action.')
+    if (!ok) {
+      throw new HttpError(
+        403,
+        'The user declined this change. Do not retry it; ask the user how they want to proceed.',
+        'declined'
+      )
+    }
     emit('work:activity', { connectionId, chatId, project: w.project.folderName, action })
   }
 
