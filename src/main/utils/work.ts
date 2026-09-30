@@ -255,15 +255,30 @@ const getChatFolderId = async (connectionId: string, chatId: string): Promise<st
 
 // Register this server as a user-level terminal server in the user's
 // Open WebUI settings.  Field-level patch — other settings are untouched.
+const readTerminalServers = async (connectionId: string): Promise<any[]> => {
+  const settings = await owuiFetch(connectionId, '/api/v1/users/user/settings?raw=true')
+  return settings?.ui?.terminalServers ?? []
+}
+
+const saveTerminalServers = (connectionId: string, servers: any[]) =>
+  owuiFetch(connectionId, '/api/v1/users/user/settings/update', {
+    method: 'POST',
+    body: JSON.stringify({ ui: { terminalServers: servers } })
+  })
+
+// Register this server as a user-level terminal server in the user's
+// Open WebUI settings.  Field-level patch — other settings are untouched.
+// Open WebUI allows only one active terminal, so once our entry exists we
+// never flip its `enabled` flag here: the user may have switched to
+// another terminal on purpose.  setWorkServerEnabled() does that on request.
 const ensureRegistered = async (connectionId: string): Promise<'ok' | 'changed'> => {
   const url = baseUrlFor(connectionId)
-  const settings = await owuiFetch(connectionId, '/api/v1/users/user/settings?raw=true')
-  const servers: any[] = settings?.ui?.terminalServers ?? []
+  const servers = await readTerminalServers(connectionId)
 
   const current = servers.find((s) => s?.desktop_work)
-  if (current && current.url === url && current.key === apiKey && current.enabled) return 'ok'
+  if (current && current.url === url && current.key === apiKey) return 'ok'
 
-  const next = [
+  await saveTerminalServers(connectionId, [
     ...servers.filter((s) => !s?.desktop_work),
     {
       url,
@@ -271,15 +286,34 @@ const ensureRegistered = async (connectionId: string): Promise<'ok' | 'changed'>
       name: SERVER_NAME,
       auth_type: 'bearer',
       path: '/openapi.json',
-      enabled: true,
+      enabled: current ? current.enabled !== false : true,
       desktop_work: true
     }
-  ]
-  await owuiFetch(connectionId, '/api/v1/users/user/settings/update', {
-    method: 'POST',
-    body: JSON.stringify({ ui: { terminalServers: next } })
-  })
+  ])
   return 'changed'
+}
+
+// Whether Open WebUI currently offers our tools (the toggle in
+// Open WebUI → Settings → Integrations → Open Terminal).
+export const getWorkServerEnabled = async (connectionId: string): Promise<boolean | null> => {
+  const servers = await readTerminalServers(connectionId)
+  const current = servers.find((s) => s?.desktop_work)
+  return current ? current.enabled !== false : null
+}
+
+// Turn our terminal server on/off in Open WebUI.  Enabling mirrors Open
+// WebUI's own toggle: the other direct terminals are switched off.
+export const setWorkServerEnabled = async (connectionId: string, enabled: boolean) => {
+  await ensureRegistered(connectionId)
+  const servers = await readTerminalServers(connectionId)
+  await saveTerminalServers(
+    connectionId,
+    servers.map((s) =>
+      s?.desktop_work ? { ...s, enabled } : enabled ? { ...s, enabled: false } : s
+    )
+  )
+  // Open WebUI reads terminal servers on load
+  emit('work:reload', { connectionId })
 }
 
 const scheduleRegister = (connectionId: string, delay = REGISTER_RETRY_MS) => {
@@ -320,8 +354,11 @@ export const getWorkProjects = async (connectionId: string) => {
   } catch (err) {
     error = err?.message ?? String(err)
   }
+  let serverEnabled: boolean | null = null
+  if (!error) serverEnabled = await getWorkServerEnabled(connectionId).catch(() => null)
   return {
     error,
+    serverEnabled,
     folders: folders.map((f) => ({
       id: f.id,
       name: f.name,

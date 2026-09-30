@@ -14,6 +14,7 @@
   } | null>(null)
   let connectionId = $state<string | null>(null)
   let folders = $state<Folder[]>([])
+  let serverEnabled = $state<boolean | null>(null)
   let error = $state<string | null>(null)
   let loading = $state(false)
   let loaded = $state(false)
@@ -44,6 +45,7 @@
     loading = true
     const result = await window.electronAPI.getWorkProjects(connectionId)
     folders = result?.folders ?? []
+    serverEnabled = result?.serverEnabled ?? null
     error = result?.error ?? null
     loading = false
   }
@@ -62,6 +64,11 @@
   const setEnabled = async (value: boolean) => {
     info = await window.electronAPI.setWorkEnabled(value)
     config.set(await window.electronAPI.getConfig())
+  }
+
+  const setServerEnabled = async (value: boolean) => {
+    await window.electronAPI.setWorkServerEnabled(connectionId, value)
+    await loadProjects()
   }
 
   const link = async (folder: Folder) => {
@@ -102,6 +109,24 @@
         <Switch checked={enabled} label={$i18n.t('settings.work.enable')} onchange={setEnabled} />
       </div>
     </div>
+
+    {#if enabled && connectionId && !error && serverEnabled !== null}
+      <div class="py-4 flex items-center justify-between">
+        <div class="pr-6">
+          <div class="text-[13px] opacity-70">{$i18n.t('settings.work.serverInOpenWebUI')}</div>
+          <div class="text-[11px] opacity-25 mt-0.5">
+            {serverEnabled
+              ? $i18n.t('settings.work.serverOnDesc')
+              : $i18n.t('settings.work.serverOffDesc')}
+          </div>
+        </div>
+        <Switch
+          checked={serverEnabled}
+          label={$i18n.t('settings.work.serverInOpenWebUI')}
+          onchange={setServerEnabled}
+        />
+      </div>
+    {/if}
 
     {#if enabled}
       <div class="py-4">

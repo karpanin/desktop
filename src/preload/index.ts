@@ -196,6 +196,8 @@ const api = {
   unlinkWorkProject: (connectionId: string, folderId: string) =>
     ipcRenderer.invoke('work:unlink', connectionId, folderId),
   setWorkEnabled: (enabled: boolean) => ipcRenderer.invoke('work:setEnabled', enabled),
+  setWorkServerEnabled: (connectionId: string, enabled: boolean) =>
+    ipcRenderer.invoke('work:setServerEnabled', connectionId, enabled),
 
   // Auth token relay from webview
   setAuthToken: (token: string) => ipcRenderer.invoke('app:setAuthToken', token)

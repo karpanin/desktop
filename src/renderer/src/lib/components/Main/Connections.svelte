@@ -445,8 +445,8 @@
 
       // ── Work mode ─────────────────────────────────────
       if (data.type === 'work:reload' && data.data?.connectionId) {
-        // Open WebUI reads terminal servers on startup — reload once after
-        // the local files server has been registered in user settings
+        // Open WebUI reads terminal servers on startup — reload after the
+        // local files server entry in the user's settings has changed
         const wv = document.querySelector(
           `webview[partition="persist:connection-${data.data.connectionId}"]`
         ) as any

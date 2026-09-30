@@ -91,7 +91,8 @@ import {
   getWorkProjects,
   linkWorkProject,
   updateWorkProject,
-  unlinkWorkProject
+  unlinkWorkProject,
+  setWorkServerEnabled
 } from './utils/work'
 
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater'
@@ -1642,6 +1643,9 @@ if (!gotTheLock) {
     )
     ipcMain.handle('work:unlink', (_event, connectionId: string, folderId: string) =>
       unlinkWorkProject(connectionId, folderId)
+    )
+    ipcMain.handle('work:setServerEnabled', (_event, connectionId: string, enabled: boolean) =>
+      setWorkServerEnabled(connectionId, enabled)
     )
     ipcMain.handle('work:setEnabled', async (_event, enabled: boolean) => {
       const config = await getConfig()

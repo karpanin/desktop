@@ -9,6 +9,7 @@
 
   let visible = $state(false)
   let settingsOpen = $state(false)
+  let settingsTab = $state('general')
   let sidebarOpen = $state(true)
   let activeConnectionName = $state('')
 
@@ -92,8 +93,20 @@
       <div class="flex-1 flex items-center justify-center">
         <span class="text-[11px] opacity-80">{activeConnectionName || $i18n.t('app.name')}</span>
       </div>
-      <div class="pr-3 flex items-center shrink-0 translate-y-[0.5px]">
+      <div class="pr-3 flex items-center gap-3 shrink-0 translate-y-[0.5px]">
         {#if activeConnectionName}
+          <button
+            class="opacity-40 hover:opacity-80 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] no-drag cursor-pointer"
+            onclick={() => {
+              settingsTab = 'work'
+              settingsOpen = true
+            }}
+            use:tooltip={$i18n.t('settings.work.projects')}
+          >
+            <svg class="w-[14px] h-[14px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+            </svg>
+          </button>
           <button
             class="opacity-40 hover:opacity-80 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] no-drag cursor-pointer"
             onclick={() => {
@@ -115,7 +128,10 @@
       <Connections
         {sidebarOpen}
         bind:activeConnectionName
-        onOpenSettings={() => (settingsOpen = true)}
+        onOpenSettings={() => {
+          settingsTab = 'general'
+          settingsOpen = true
+        }}
       />
     </div>
 
@@ -134,7 +150,7 @@
           in:fade={{ duration: 150 }}
           onclick={(e) => e.stopPropagation()}
         >
-          <Settings onClose={() => (settingsOpen = false)} />
+          <Settings initialTab={settingsTab} onClose={() => (settingsOpen = false)} />
         </div>
       </div>
     {/if}

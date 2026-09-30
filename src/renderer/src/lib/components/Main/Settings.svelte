@@ -13,11 +13,13 @@
 
   interface Props {
     onClose: () => void
+    initialTab?: string
   }
 
-  let { onClose }: Props = $props()
+  let { onClose, initialTab = 'general' }: Props = $props()
 
-  let settingsTab = $state('general')
+  // svelte-ignore state_referenced_locally
+  let settingsTab = $state(initialTab)
 
   const tabs = [
     {
