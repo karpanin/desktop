@@ -9,6 +9,7 @@ import { app, dialog, session, shell, webContents, BrowserWindow } from 'electro
 import log from 'electron-log'
 import { getConfig, setConfig } from './index'
 import { extractDocumentText, isExtractableDocument } from './work-documents'
+import { classifyCommand, runShellCommand, shellName } from './work-shell'
 import {
   ensureWorkPython,
   getWorkPythonStatus,
@@ -16,7 +17,7 @@ import {
   runWorkScript
 } from './work-python'
 
-// ─── Work Mode: Local Files Server ──────────────────────
+// ─── Work Mode: Desktop tools server ────────────────────
 // A small HTTP server that gives Open WebUI's agent loop access to a
 // local folder.  It speaks the Open Terminal file API, so Open WebUI
 // treats it as a user-level ("direct") terminal server:
@@ -48,6 +49,8 @@ export interface WorkProject {
   folderName: string
   path: string
   mode: WorkMode
+  // Terminal commands (run_command); on unless the user turned them off
+  shell?: boolean
 }
 
 export interface WorkConfig {
@@ -55,7 +58,7 @@ export interface WorkConfig {
   port: number
   apiKey: string
   projects: Record<string, WorkProject>
-  // Chat / Work per connection: whether the Local Files terminal is on
+  // Chat / Work per connection: whether the Desktop tools terminal is on
   serverEnabled: Record<string, boolean>
 }
 
@@ -68,7 +71,7 @@ const SKIP_DIRS = new Set(['node_modules', '.git', '__pycache__', '.venv', '.DS_
 const CHAT_FOLDER_TTL = 10_000
 const FOLDERS_TTL = 30_000
 const CLEANUP_RETRY_MS = 5_000
-const SERVER_NAME = 'Local Files (Desktop)'
+const SERVER_NAME = 'Desktop'
 
 // ─── State ──────────────────────────────────────────────
 
@@ -350,7 +353,7 @@ const scheduleCleanup = (connectionId: string, delay = CLEANUP_RETRY_MS) => {
         const removed = await cleanupLegacyEntry(connectionId)
         cleaned.add(connectionId)
         if (removed) {
-          log.info(`[work] removed the server-stored Local Files entry for ${connectionId}`)
+          log.info(`[work] removed the server-stored Desktop tools entry for ${connectionId}`)
           // The open page still holds the old key
           emit('work:reload', { connectionId })
         }
@@ -366,7 +369,7 @@ const scheduleCleanup = (connectionId: string, delay = CLEANUP_RETRY_MS) => {
   )
 }
 
-// Chat / Work for a connection (the Local Files terminal on or off)
+// Chat / Work for a connection (the Desktop tools terminal on or off)
 export const getWorkServerEnabled = async (connectionId: string): Promise<boolean> =>
   (await workConfig()).serverEnabled[connectionId] ?? false
 
@@ -386,12 +389,12 @@ export const getWorkPageEntry = async (connectionId: string) => {
   }
 }
 
-// The user toggled Local Files in Open WebUI's own UI (Integrations or the
+// The user toggled Desktop tools in Open WebUI's own UI (Integrations or the
 // chat input's terminal menu) — follow it, the page already applied it.
 export const reportWorkServerEnabled = (connectionId: string, enabled: boolean) =>
   saveServerEnabled(connectionId, enabled)
 
-// Switch between Chat and Work.  Enabling also selects Local Files in the
+// Switch between Chat and Work.  Enabling also selects Desktop tools in the
 // chat input's terminal menu so the file panel works right away; the page
 // reloads so Open WebUI picks up the change.
 export const setWorkServerEnabled = async (connectionId: string, enabled: boolean) => {
@@ -713,6 +716,14 @@ export type ApprovalView =
   | { kind: 'script'; description: string; code: string }
   | { kind: 'folder' | 'delete'; path: string }
   | { kind: 'move' | 'copy'; path: string; to: string }
+  | {
+      kind: 'command'
+      command: string
+      shell: string
+      description: string
+      reasons: string[]
+      always: boolean
+    }
 
 type Decision = 'allow' | 'allow-chat' | 'deny'
 
@@ -772,14 +783,16 @@ const requestApproval = (
   ws: Workspace,
   action: string,
   detail: string,
-  view?: ApprovalView
+  view?: ApprovalView,
+  always = false // risky: ask even in autonomous mode / after "allow for this chat"
 ): Promise<boolean> => {
   const chatKey = `${connectionId}:${chatId}`
-  if (ws.project.mode === 'auto' || chatApprovals.has(chatKey)) return Promise.resolve(true)
+  if (!always && (ws.project.mode === 'auto' || chatApprovals.has(chatKey)))
+    return Promise.resolve(true)
 
   // One question at a time — parallel tool calls queue up
   const run = async () => {
-    if (chatApprovals.has(chatKey)) return true
+    if (!always && chatApprovals.has(chatKey)) return true
     const win = getWindow()
     if (win && (win.isMinimized() || !win.isVisible())) win.show()
 
@@ -791,19 +804,22 @@ const requestApproval = (
       view: view ?? null
     })
     if (decision === null) {
+      const buttons = always ? ['Allow', 'Deny'] : ['Allow', 'Allow for this chat', 'Deny']
       const { response } = await dialog.showMessageBox(win ?? undefined, {
         type: 'question',
-        buttons: ['Allow', 'Allow for this chat', 'Deny'],
+        buttons,
         defaultId: 0,
-        cancelId: 2,
+        cancelId: buttons.length - 1,
         noLink: true,
         title: 'Open WebUI — Work',
         message: `${action}`,
         detail: `Project: ${ws.project.folderName}\nFolder: ${ws.root}\n\n${detail}`.slice(0, 4000)
       })
-      decision = (['allow', 'allow-chat', 'deny'] as const)[response]
+      decision = always
+        ? (['allow', 'deny'] as const)[response]
+        : (['allow', 'allow-chat', 'deny'] as const)[response]
     }
-    if (decision === 'allow-chat') chatApprovals.add(chatKey)
+    if (decision === 'allow-chat' && !always) chatApprovals.add(chatKey)
     return decision !== 'deny'
   }
   const result = approvalQueue.then(run, run)
@@ -1353,6 +1369,31 @@ const openApiSpec = () => ({
         )
       }
     },
+    '/tools/run_command': {
+      post: {
+        operationId: 'run_command',
+        summary: `Run a ${shellName()} command`,
+        description:
+          `Run a ${shellName()} command with the project folder as the working directory — for things ` +
+          'the file tools cannot do: archives, converting files with installed tools, git status, ' +
+          'file hashes, bulk listing and renaming. Read-only commands run immediately; commands that ' +
+          "change files follow the project's access mode. Network access, paths outside the project " +
+          'folder, running programs or scripts, package managers and stopping processes always need ' +
+          "the user's approval; admin and system commands are blocked. Commands are not interactive " +
+          '(no input). For Python use run_script instead.' +
+          (process.platform === 'win32'
+            ? ' Use PowerShell syntax (Get-ChildItem, Select-String, Compress-Archive, …).'
+            : ''),
+        requestBody: jsonBody(
+          {
+            command: str('The command line.'),
+            description: str('One short sentence for the user: what the command does.'),
+            timeout_seconds: int('Time limit, default 120, max 600.')
+          },
+          ['command', 'description']
+        )
+      }
+    },
     '/tools/run_script': {
       post: {
         operationId: 'run_script',
@@ -1395,9 +1436,10 @@ const openApiSpec = () => ({
 const MODEL_TOOL_ROUTES = new Set(Object.keys(openApiSpec().paths))
 
 const SYSTEM_PROMPT =
-  "You can work with files in a local folder on the user's computer through the Local Files tools " +
+  "You can work with files in a local folder on the user's computer through the Desktop tools " +
   '(get_workspace, list_files, read_file, grep_search, glob_search, write_file, replace_file_content, ' +
-  'create_directory, move_path, copy_path, delete_path, run_script, update_plan, display_file). They only ' +
+  'create_directory, move_path, copy_path, delete_path, run_script, run_command, update_plan, display_file). ' +
+  `run_command uses ${shellName()}. They only ` +
   'work when the chat ' +
   'belongs to an Open WebUI project that the user linked to a local folder in Open WebUI Desktop. ' +
   'When the user asks about their files or documents, call get_workspace first. Use paths relative to ' +
@@ -1523,7 +1565,8 @@ const routeRequest = async (
     action: string,
     detail: string,
     view?: ApprovalView,
-    recordDone = true
+    recordDone = true,
+    always = false
   ) => {
     if (w.project.mode === 'read') {
       recordActivity(connectionId, chatId, { action, status: 'blocked' })
@@ -1534,7 +1577,7 @@ const routeRequest = async (
         'read_only'
       )
     }
-    const ok = await requestApproval(connectionId, chatId, w, action, detail, view)
+    const ok = await requestApproval(connectionId, chatId, w, action, detail, view, always)
     if (!ok) {
       recordActivity(connectionId, chatId, { action, status: 'declined' })
       throw new HttpError(
@@ -1854,6 +1897,71 @@ const routeRequest = async (
     state.explanation = body.explanation ? String(body.explanation).slice(0, 500) : undefined
     publishChat(connectionId, chatId)
     return sendJson(res, 200, { ok: true, steps: plan.length })
+  }
+
+  if (route === '/tools/run_command' && method === 'POST') {
+    const w = requireWs()
+    if (w.project.shell === false) {
+      throw new HttpError(
+        403,
+        'Terminal commands are turned off for this project (Open WebUI Desktop). Use the file tools or ' +
+          'run_script instead, and do not retry run_command.',
+        'shell_disabled'
+      )
+    }
+    const body = await readJson(req)
+    const command = String(body.command ?? '').trim()
+    if (!command) throw new HttpError(400, 'command is required')
+    if (command.length > 4000)
+      throw new HttpError(400, 'The command is too long; write a script instead.')
+    const what = String(body.description ?? '').trim()
+    const action = `Run command: ${what || command.slice(0, 80)}`
+    const check = classifyCommand(command, { root: w.root, readRoots: skillRoots() })
+
+    if (check.level === 'blocked') {
+      recordActivity(connectionId, chatId, { action, status: 'blocked' })
+      throw new HttpError(
+        403,
+        `"${check.blocked}" is an administrative or system command and is never allowed in Work mode. ` +
+          'Do not retry; tell the user.',
+        'command_blocked'
+      )
+    }
+    if (check.level !== 'read') {
+      await guardWrite(
+        w,
+        action,
+        command,
+        {
+          kind: 'command',
+          command,
+          shell: shellName(),
+          description: what,
+          reasons: check.reasons,
+          always: check.level === 'risky'
+        },
+        false,
+        check.level === 'risky'
+      )
+    }
+
+    const seconds = Math.min(600, Math.max(5, Number(body.timeout_seconds) || 120))
+    const result = await runShellCommand({ command, root: w.root, timeoutMs: seconds * 1000 })
+    const changed = check.level === 'read' ? [] : await changedSince(w.root, result.started)
+    if (check.level !== 'read' || result.exit_code !== 0) {
+      recordActivity(connectionId, chatId, {
+        action,
+        status: result.exit_code === 0 && !result.timed_out ? 'done' : 'failed',
+        files: changed.slice(0, 10)
+      })
+    }
+    return sendJson(res, 200, {
+      exit_code: result.exit_code,
+      timed_out: result.timed_out,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      changed_files: changed
+    })
   }
 
   if (route === '/tools/run_script' && method === 'POST') {

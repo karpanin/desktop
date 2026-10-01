@@ -1682,7 +1682,7 @@ if (!gotTheLock) {
       if (!connectionId) throw new Error('Not an Open WebUI connection page')
       return connectionId
     }
-    // Asked by the preload as the page starts: the Local Files entry to add
+    // Asked by the preload as the page starts: the Desktop tools entry to add
     // to this page's Open WebUI settings (it is never stored on the server)
     ipcMain.handle('work:page:entry', async (event) => {
       const connectionId = await pageConnection(event).catch(() => null)
@@ -1703,6 +1703,9 @@ if (!gotTheLock) {
       if (!['read', 'confirm', 'auto'].includes(mode)) throw new Error('Invalid mode')
       return updateWorkProject(await pageConnection(event), String(folderId), { mode })
     })
+    ipcMain.handle('work:page:setShell', async (event, folderId: string, enabled: boolean) =>
+      updateWorkProject(await pageConnection(event), String(folderId), { shell: enabled === true })
+    )
     ipcMain.handle('work:page:link', async (event, folderId: string, folderName: string) =>
       linkWorkFolderWithDialog(await pageConnection(event), String(folderId), String(folderName))
     )

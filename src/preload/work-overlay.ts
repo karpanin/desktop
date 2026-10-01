@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-// ─── Local Files entry: desktop-only ────────────────────
-// The Local Files terminal server is never stored in Open WebUI.  This runs
+// ─── Desktop tools entry: desktop-only ────────────────────
+// The Desktop tools terminal server is never stored in Open WebUI.  This runs
 // in the page's own world before Open WebUI starts and wraps fetch():
 //   • GET  /api/v1/users/user/settings        → add our entry to
 //     ui.terminalServers (and drop any stale copy)
@@ -126,7 +126,7 @@ export const installWorkSettingsBridge = () => {
       })
     })
 
-  // The user toggled Local Files in Open WebUI's own UI
+  // The user toggled Desktop tools in Open WebUI's own UI
   window.addEventListener('message', (e) => {
     if (e.source === window && e.data?.__owuiDesktopWork === 'enabled') {
       ipcRenderer.invoke('work:page:reportEnabled', e.data.enabled === true).catch(() => {})
@@ -141,11 +141,11 @@ export const installWorkSettingsBridge = () => {
 // can neither read nor click it.  It talks to the main process directly
 // (work:page:*), which derives the connection from this webview's session.
 //
-//   Chat — Local Files is off in Open WebUI: no local file tools
-//   Work — Local Files is on; the chip shows the project's local folder and
+//   Chat — Desktop tools are off in Open WebUI: no local file tools
+//   Work — Desktop tools are on; the chip shows the project's local folder and
 //          access mode, or lets the user pick / link a project
 
-type Project = { folderId: string; folderName: string; path: string; mode: string }
+type Project = { folderId: string; folderName: string; path: string; mode: string; shell?: boolean }
 type PageState = {
   enabled: boolean | null
   context: { folderId: string; folderName: string; project: Project | null } | null
@@ -211,7 +211,20 @@ const STRINGS = {
     st_done: 'done',
     st_failed: 'failed',
     st_declined: 'declined',
-    st_blocked: 'blocked (read only)'
+    st_blocked: 'blocked',
+    terminal: 'Terminal commands',
+    approveCommand: 'Allow this command?',
+    runsIn: 'Runs in {shell} in the project folder.',
+    alwaysAsk: 'Asked every time:',
+    r_writes: 'changes files',
+    r_outside: 'reaches outside the project folder',
+    r_network: 'uses the network',
+    r_complex: 'hard to check (substitutions or variables)',
+    r_program: 'runs another program or script',
+    r_packages: 'installs software',
+    r_process: 'stops processes',
+    r_unknown: 'unknown command',
+    'r_project-root': 'affects the whole project folder'
   },
   ru: {
     chat: 'Чат',
@@ -254,7 +267,20 @@ const STRINGS = {
     st_done: 'выполнено',
     st_failed: 'ошибка',
     st_declined: 'отклонено',
-    st_blocked: 'запрещено (только чтение)'
+    st_blocked: 'запрещено',
+    terminal: 'Команды терминала',
+    approveCommand: 'Разрешить команду?',
+    runsIn: 'Выполняется в {shell} в папке проекта.',
+    alwaysAsk: 'Спрашиваем каждый раз:',
+    r_writes: 'меняет файлы',
+    r_outside: 'обращается за пределы папки проекта',
+    r_network: 'использует сеть',
+    r_complex: 'сложно проверить (подстановки или переменные)',
+    r_program: 'запускает другую программу или скрипт',
+    r_packages: 'устанавливает программы',
+    r_process: 'останавливает процессы',
+    r_unknown: 'неизвестная команда',
+    'r_project-root': 'затрагивает всю папку проекта'
   }
 }
 
@@ -314,6 +340,7 @@ svg { flex-shrink: 0; }
   font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }
 .preview, .preview * { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
 .preview div { padding: 0 10px; }
+.preview.wrap { white-space: pre-wrap; word-break: break-all; }
 .preview .del { background: var(--del-bg); color: var(--del-fg); }
 .preview .add { background: var(--add-bg); color: var(--add-fg); }
 .preview .gap { height: 8px; }
@@ -431,6 +458,7 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
     const dark = document.documentElement.classList.contains('dark')
     for (const [k, v] of Object.entries(dark ? THEMES.dark : THEMES.light))
       host.style.setProperty(k, v)
+    host.style.colorScheme = dark ? 'dark' : 'light' // native scrollbars
   }
 
   const chipLabel = (): string => {
@@ -496,6 +524,8 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
       `<button class="item" data-action="open-folder" title="${escape(t('openFolder'))}">${FOLDER_ICON}` +
       `<span class="grow">${escape(project.path)}${inherited}</span></button>` +
       `<div class="sep"></div><div class="label">${escape(t('access'))}</div>${modes}` +
+      `<button class="item" data-action="toggle-shell"><span class="check">${project.shell !== false ? '✓' : ''}</span>` +
+      `<span class="grow">${escape(t('terminal'))}</span></button>` +
       `<div class="sep"></div><button class="item" data-action="link"><span class="check"></span>` +
       `<span class="grow">${escape(t('changeFolder'))}</span></button>`
     )
@@ -617,6 +647,16 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
         previewHtml = lines(v.code, '', '')
         note = t('scriptNote')
         break
+      case 'command': {
+        title = t('approveCommand')
+        line = escape(v.description || a.action)
+        previewHtml = lines(v.command, '', v.shell?.includes('PowerShell') ? 'PS> ' : '$ ')
+        const reasons = (v.reasons ?? []).map((r: string) => t(`r_${r}` as 'r_writes')).join(', ')
+        note =
+          t('runsIn', { shell: v.shell ?? '' }) +
+          (v.always && reasons ? ` ${t('alwaysAsk')} ${reasons}.` : reasons ? ` (${reasons})` : '')
+        break
+      }
       case 'folder':
         line = escape(t('createFolder', { path: v.path }))
         break
@@ -633,14 +673,18 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
       `<div class="card-title">${escape(title)}</div>` +
       `<div class="card-sub">${FOLDER_ICON} ${escape(a.project)} · ${escape(a.root)}</div>` +
       `<div class="card-line">${line}</div>` +
-      (previewHtml ? `<div class="preview">${previewHtml}</div>` : '') +
+      (previewHtml
+        ? `<div class="preview${v.kind === 'command' ? ' wrap' : ''}">${previewHtml}</div>`
+        : '') +
       (note ? `<div class="card-note">${escape(note)}</div>` : '') +
       `<div class="card-actions">` +
       (approvals.length > 1
         ? `<span class="more">${escape(t('morePending', { n: String(approvals.length - 1) }))}</span>`
         : '') +
       `<button data-action="approve" data-arg="deny">${escape(t('deny'))}</button>` +
-      `<button data-action="approve" data-arg="allow-chat">${escape(t('allowChat'))}</button>` +
+      (v.always
+        ? ''
+        : `<button data-action="approve" data-arg="allow-chat">${escape(t('allowChat'))}</button>`) +
       `<button class="primary" data-action="approve" data-arg="allow">${escape(t('allow'))}</button>` +
       `</div></div>`
     )
@@ -743,6 +787,16 @@ export const initWorkOverlay = (options: { navigate: (path: string) => void }) =
       case 'mode':
         if (!ctx?.project) return
         run(() => ipcRenderer.invoke('work:page:setMode', ctx.project!.folderId, arg))
+        return
+      case 'toggle-shell':
+        if (!ctx?.project) return
+        run(() =>
+          ipcRenderer.invoke(
+            'work:page:setShell',
+            ctx.project!.folderId,
+            ctx.project!.shell === false
+          )
+        )
         return
       case 'open-folder':
         if (!ctx?.project) return
